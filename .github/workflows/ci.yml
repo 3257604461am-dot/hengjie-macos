@@ -1,0 +1,24 @@
+name: macOS CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-check:
+    runs-on: macos-14
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+      - name: Show Swift version
+        run: swift --version
+      - name: Build HengJie
+        run: swift build -c debug --product HengJie
+      - name: Run core checks
+        run: swift run HengJieCoreChecks
