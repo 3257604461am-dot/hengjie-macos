@@ -27,4 +27,18 @@ public enum ClipboardHistoryRules {
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .prefix(maximumLength))
     }
+
+    public static func normalizedSearchText(_ value: String, maximumLength: Int = 100_000) -> String {
+        let folded = value.folding(options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive], locale: Locale(identifier: "zh_Hans"))
+        return String(folded
+            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .prefix(maximumLength))
+    }
+
+    public static func matches(searchText: String, query: String) -> Bool {
+        let haystack = normalizedSearchText(searchText)
+        let tokens = normalizedSearchText(query).split(separator: " ").map(String.init)
+        return tokens.isEmpty || tokens.allSatisfy { haystack.localizedStandardContains($0) }
+    }
 }

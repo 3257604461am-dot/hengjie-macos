@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT="${0:A:h:h}"
 OUTPUT="$ROOT/outputs"
 APP="$OUTPUT/横截.app"
-ZIP="$OUTPUT/横截-0.7.0-arm64.zip"
+ZIP="$OUTPUT/横截-0.8.0-arm64.zip"
 
 cd "$ROOT"
 swift build -c release --product HengJie --arch arm64
