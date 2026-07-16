@@ -11,6 +11,7 @@ final class AnnotationEditorWindowController: NSWindowController, NSWindowDelega
     private let canvas: AnnotationCanvas
     private let presentationMode: EditorPresentationMode
     private let closeHandler: (AnnotationEditorWindowController) -> Void
+    private let historyID: UUID?
     private let colorWell = NSColorWell()
     private let widthSlider = NSSlider(value: 4, minValue: 1, maxValue: 16, target: nil, action: nil)
     private var toolButtons: [NSButton] = []
@@ -20,10 +21,18 @@ final class AnnotationEditorWindowController: NSWindowController, NSWindowDelega
     private let zoomLabel = NSTextField(labelWithString: "100%")
     private var didApplyInitialFit = false
 
-    init(image: CGImage, presentationMode: EditorPresentationMode = .fitToWindow, closeHandler: @escaping (AnnotationEditorWindowController) -> Void) {
-        canvas = AnnotationCanvas(image: image)
+    init(
+        image: CGImage,
+        displaySize: CGSize? = nil,
+        annotations: [AnnotationMarkRecord] = [],
+        historyID: UUID? = nil,
+        presentationMode: EditorPresentationMode = .fitToWindow,
+        closeHandler: @escaping (AnnotationEditorWindowController) -> Void
+    ) {
+        canvas = AnnotationCanvas(image: image, displaySize: displaySize)
         self.presentationMode = presentationMode
         self.closeHandler = closeHandler
+        self.historyID = historyID
         let visible = NSScreen.main?.visibleFrame ?? CGRect(x: 0, y: 0, width: 1200, height: 800)
         let window = NSWindow(
             contentRect: CGRect(x: 0, y: 0, width: min(1280, visible.width * 0.88), height: min(860, visible.height * 0.88)),
@@ -35,7 +44,13 @@ final class AnnotationEditorWindowController: NSWindowController, NSWindowDelega
         window.delegate = self
         buildUI()
         canvas.textProvider = { Self.requestText(title: "添加文字", prompt: "输入要标注的文字") }
-        canvas.onHistoryChange = { [weak self] in self?.updateHistoryButtons() }
+        canvas.textEditProvider = { value in Self.requestText(title: "编辑文字", prompt: "修改标注文字", initialValue: value) }
+        if !annotations.isEmpty { canvas.restore(records: annotations) }
+        canvas.onHistoryChange = { [weak self] in
+            guard let self else { return }
+            updateHistoryButtons()
+            if let historyID { ScreenshotHistoryService.shared.scheduleUpdate(id: historyID, annotations: canvas.annotationRecords()) }
+        }
     }
 
     required init?(coder: NSCoder) { nil }
@@ -58,7 +73,7 @@ final class AnnotationEditorWindowController: NSWindowController, NSWindowDelega
             button.identifier = NSUserInterfaceItemIdentifier(tool.rawValue)
             button.bezelStyle = .texturedRounded
             button.setButtonType(.toggle)
-            button.state = tool == .arrow ? .on : .off
+            button.state = tool == .select ? .on : .off
             toolButtons.append(button)
             toolbar.addArrangedSubview(button)
         }
@@ -82,6 +97,7 @@ final class AnnotationEditorWindowController: NSWindowController, NSWindowDelega
         actions.spacing = 5
         actions.addArrangedSubview(undoButton)
         actions.addArrangedSubview(redoButton)
+        actions.addArrangedSubview(button("删除标注", #selector(deleteSelectedMark)))
         actions.addArrangedSubview(button("适合", #selector(fitToWindow)))
         actions.addArrangedSubview(button("−", #selector(zoomOut)))
         zoomLabel.alignment = .center
@@ -139,12 +155,15 @@ final class AnnotationEditorWindowController: NSWindowController, NSWindowDelega
     @objc private func updateStyle() {
         canvas.selectedColor = colorWell.color
         canvas.selectedLineWidth = CGFloat(widthSlider.doubleValue)
+        canvas.applyStyleToSelection(color: colorWell.color, lineWidth: CGFloat(widthSlider.doubleValue))
     }
 
     @objc private func undo() { canvas.undo() }
     @objc private func redo() { canvas.redo() }
+    @objc private func deleteSelectedMark() { canvas.deleteSelectedMark() }
     private func updateHistoryButtons() {
-        undoButton?.isEnabled = !canvas.marks.isEmpty
+        undoButton?.isEnabled = canvas.canUndo
+        redoButton?.isEnabled = canvas.canRedo
     }
 
     @objc private func fitToWindow() {
@@ -178,11 +197,15 @@ final class AnnotationEditorWindowController: NSWindowController, NSWindowDelega
 
     @objc private func copyImage() {
         ImageExport.copy(canvas.renderedImage())
+        completeHistoryIfNeeded()
         transientNotice("已复制到剪贴板")
     }
 
     @objc private func saveImage() {
-        do { try ImageExport.save(canvas.renderedImage(), format: AppPreferences.shared.saveFormat) }
+        do {
+            try ImageExport.save(canvas.renderedImage(), format: AppPreferences.shared.saveFormat)
+            completeHistoryIfNeeded()
+        }
         catch { NSAlert(error: error).runModal() }
     }
 
@@ -197,11 +220,17 @@ final class AnnotationEditorWindowController: NSWindowController, NSWindowDelega
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in self?.window?.title = "横截 — 标注" }
     }
 
-    static func requestText(title: String, prompt: String) -> String? {
+    private func completeHistoryIfNeeded() {
+        guard let historyID else { return }
+        ScreenshotHistoryService.shared.complete(id: historyID, annotations: canvas.annotationRecords())
+    }
+
+    static func requestText(title: String, prompt: String, initialValue: String = "") -> String? {
         let alert = NSAlert()
         alert.messageText = title
         alert.informativeText = prompt
         let field = NSTextField(frame: CGRect(x: 0, y: 0, width: 320, height: 24))
+        field.stringValue = initialValue
         alert.accessoryView = field
         alert.addButton(withTitle: "确定")
         alert.addButton(withTitle: "取消")

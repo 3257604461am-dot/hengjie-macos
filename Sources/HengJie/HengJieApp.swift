@@ -18,16 +18,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let hotKeyRegistry = GlobalHotKeyRegistry()
     private let coordinator = CaptureCoordinator()
     private let historyService = ClipboardHistoryService()
-    private lazy var historyController = ClipboardHistoryWindowController(service: historyService)
+    private let screenshotHistoryService = ScreenshotHistoryService.shared
+    private lazy var historyController = ClipboardHistoryWindowController(service: historyService) { [weak self] image in
+        self?.coordinator.editClipboardImage(image)
+    }
+    private lazy var screenshotHistoryController = ScreenshotHistoryWindowController(service: screenshotHistoryService) { [weak self] loaded in
+        self?.coordinator.editScreenshotProject(loaded)
+    }
     private var preferencesController: PreferencesWindowController?
     private lazy var menuPanel = MenuPanelController(actions: .init(
         standard: { [weak self] in self?.standardCapture() },
+        delayed: { [weak self] in self?.delayedCapture() },
         vertical: { [weak self] in self?.verticalCapture() },
         horizontal: { [weak self] in self?.horizontalCapture() },
         pin: { [weak self] in self?.pinRegion() },
         text: { [weak self] in self?.extractText() },
         gif: { [weak self] in self?.recordGIF() },
         history: { [weak self] in self?.showClipboardHistory() },
+        recentScreenshots: { [weak self] in self?.showRecentScreenshots() },
         permissions: { [weak self] in self?.checkPermissions() },
         preferences: { [weak self] in self?.openPreferences() },
         diagnostics: { DiagnosticBundleExporter.present() },
@@ -73,12 +81,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func standardCapture() { DiagnosticLogger.shared.log("capture", "standard_started"); coordinator.begin(mode: .standard) }
+    @objc private func delayedCapture() { DiagnosticLogger.shared.log("capture", "delayed_started"); coordinator.beginDelayedCapture() }
     @objc private func verticalCapture() { DiagnosticLogger.shared.log("capture", "vertical_started"); coordinator.begin(mode: .vertical) }
     @objc private func horizontalCapture() { DiagnosticLogger.shared.log("capture", "horizontal_started"); coordinator.begin(mode: .horizontal) }
     @objc private func pinRegion() { DiagnosticLogger.shared.log("capture", "pin_started"); coordinator.beginPin() }
     @objc private func extractText() { DiagnosticLogger.shared.log("capture", "ocr_started"); coordinator.beginTextExtraction() }
     @objc private func recordGIF() { DiagnosticLogger.shared.log("capture", "gif_toggled"); coordinator.beginGIFRecording() }
     @objc private func showClipboardHistory() { openClipboardHistory() }
+    @objc private func showRecentScreenshots() { openRecentScreenshots() }
     @objc private func quit() { NSApplication.shared.terminate(nil) }
 
     @objc private func checkPermissions() {
@@ -93,7 +103,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let self else { return }
             if AppPreferences.shared.clipboardHistoryEnabled { self.historyService.start() }
             else { self.historyService.stop() }
-        }, onClearHistory: { [weak self] in self?.historyService.clearAll() })
+        }, onClearHistory: { [weak self] in self?.historyService.clearAll() },
+        onClearScreenshotHistory: { [weak self] in self?.screenshotHistoryService.clearAll() })
         preferencesController = controller
         controller.showWindow(nil)
         NSApp.activate(ignoringOtherApps: true)
@@ -128,6 +139,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             historyService.start()
         }
         historyController.presentNearMouse()
+    }
+
+    private func openRecentScreenshots() {
+        if !AppPreferences.shared.screenshotHistoryConsentCompleted {
+            let alert = NSAlert()
+            alert.messageText = "启用最近截图？"
+            alert.informativeText = "启用后，横截会把新截图的原始底图和可编辑标注图层保存在本机，最长 30 天、最多 100 条、总容量最多 2GB。GIF、OCR、钉图和剪贴板内容不会进入最近截图。"
+            alert.addButton(withTitle: "同意并启用")
+            alert.addButton(withTitle: "仅查看现有记录")
+            let response = alert.runModal()
+            if response == .alertFirstButtonReturn {
+                AppPreferences.shared.screenshotHistoryConsentCompleted = true
+                AppPreferences.shared.screenshotHistoryEnabled = true
+            }
+        } else if !AppPreferences.shared.screenshotHistoryEnabled {
+            let alert = NSAlert()
+            alert.messageText = "截图历史记录已关闭"
+            alert.informativeText = "现有记录仍可查看。重新启用后，只会记录之后的新截图。"
+            alert.addButton(withTitle: "查看现有记录")
+            alert.addButton(withTitle: "重新启用")
+            if alert.runModal() == .alertSecondButtonReturn { AppPreferences.shared.screenshotHistoryEnabled = true }
+        }
+        screenshotHistoryController.present()
     }
 
     private func showPermissionIntroduction() {

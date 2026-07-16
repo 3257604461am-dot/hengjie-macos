@@ -3,12 +3,13 @@ import AppKit
 @MainActor
 final class PreferencesWindowController: NSWindowController {
     private enum Section: Int, CaseIterable {
-        case general, shortcuts, capture, clipboard, diagnostics, about
+        case general, shortcuts, capture, screenshotHistory, clipboard, diagnostics, about
         var title: String {
             switch self {
             case .general: "通用"
             case .shortcuts: "快捷键"
             case .capture: "截图与拼接"
+            case .screenshotHistory: "截图历史"
             case .clipboard: "剪贴板历史"
             case .diagnostics: "诊断"
             case .about: "关于"
@@ -19,6 +20,7 @@ final class PreferencesWindowController: NSWindowController {
             case .general: "gearshape"
             case .shortcuts: "keyboard"
             case .capture: "viewfinder"
+            case .screenshotHistory: "photo.stack"
             case .clipboard: "clipboard"
             case .diagnostics: "stethoscope"
             case .about: "info.circle"
@@ -29,6 +31,7 @@ final class PreferencesWindowController: NSWindowController {
     private let onApplyHotKeys: ([String: HotKeyBinding]) -> Result<Void, HotKeyRegistrationError>
     private let onChange: () -> Void
     private let onClearHistory: () -> Void
+    private let onClearScreenshotHistory: () -> Void
     private let contentContainer = NSView()
     private let sectionTitle = NSTextField(labelWithString: "")
     private var sectionViews: [Section: NSView] = [:]
@@ -37,6 +40,8 @@ final class PreferencesWindowController: NSWindowController {
     private let formatPopup = NSPopUpButton()
     private let loginCheckbox = NSButton(checkboxWithTitle: "登录时启动横截", target: nil, action: nil)
     private let historyCheckbox = NSButton(checkboxWithTitle: "启用剪贴板历史（仅本机保存）", target: nil, action: nil)
+    private let screenshotHistoryCheckbox = NSButton(checkboxWithTitle: "自动保存最近截图和可编辑草稿", target: nil, action: nil)
+    private let delayPopup = NSPopUpButton()
     private let shortcutErrorLabel = NSTextField(wrappingLabelWithString: "")
     private let recorders: [String: ShortcutRecorderControl] = [
         "capture": ShortcutRecorderControl(), "pin": ShortcutRecorderControl(), "text": ShortcutRecorderControl(),
@@ -46,13 +51,15 @@ final class PreferencesWindowController: NSWindowController {
     init(
         onApplyHotKeys: @escaping ([String: HotKeyBinding]) -> Result<Void, HotKeyRegistrationError>,
         onChange: @escaping () -> Void,
-        onClearHistory: @escaping () -> Void
+        onClearHistory: @escaping () -> Void,
+        onClearScreenshotHistory: @escaping () -> Void
     ) {
         self.onApplyHotKeys = onApplyHotKeys
         self.onChange = onChange
         self.onClearHistory = onClearHistory
+        self.onClearScreenshotHistory = onClearScreenshotHistory
         let window = NSWindow(
-            contentRect: CGRect(x: 0, y: 0, width: 720, height: 540),
+            contentRect: CGRect(x: 0, y: 0, width: 720, height: 580),
             styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false
         )
         window.title = "横截设置"
@@ -122,7 +129,8 @@ final class PreferencesWindowController: NSWindowController {
         loadValues()
         sectionViews = [
             .general: generalView(), .shortcuts: shortcutsView(), .capture: captureView(),
-            .clipboard: clipboardView(), .diagnostics: diagnosticsView(), .about: aboutView()
+            .screenshotHistory: screenshotHistoryView(), .clipboard: clipboardView(),
+            .diagnostics: diagnosticsView(), .about: aboutView()
         ]
         show(.general)
     }
@@ -132,6 +140,9 @@ final class PreferencesWindowController: NSWindowController {
         formatPopup.selectItem(withTitle: AppPreferences.shared.saveFormat.uppercased())
         loginCheckbox.state = AppPreferences.shared.launchesAtLogin ? .on : .off
         historyCheckbox.state = AppPreferences.shared.clipboardHistoryEnabled ? .on : .off
+        screenshotHistoryCheckbox.state = AppPreferences.shared.screenshotHistoryEnabled ? .on : .off
+        delayPopup.addItems(withTitles: ["3 秒", "5 秒", "10 秒"])
+        delayPopup.selectItem(at: [3, 5, 10].firstIndex(of: AppPreferences.shared.delayedCaptureSeconds) ?? 0)
         let values: [String: HotKeyBinding] = [
             "capture": AppPreferences.shared.captureBinding, "pin": AppPreferences.shared.pinBinding,
             "text": AppPreferences.shared.textBinding, "gif": AppPreferences.shared.gifBinding,
@@ -162,10 +173,22 @@ final class PreferencesWindowController: NSWindowController {
     }
 
     private func captureView() -> NSView {
+        let delay = row("延时截图默认倒计时", delayPopup)
+        let selection = secondary("框选时可在浮动栏切换自由选区、1:1、4:3、16:9、自定义比例或固定像素尺寸；每次新截图默认恢复为自由选区。")
         let title = label("安全拼接策略")
         let body = secondary("滚动截图默认手动。横截会使用连续帧、多尺度边缘匹配和重复纹理检查；画面不稳定或重叠不足时会暂停，已完成部分不会丢失。")
         let limits = secondary("长边最多 100,000 像素，总图像最多 2 亿像素。自动滚动仅在鼠标位于选区内时发送滚轮事件。")
-        return vertical([title, body, limits])
+        return vertical([delay, selection, title, body, limits])
+    }
+
+    private func screenshotHistoryView() -> NSView {
+        let clear = NSButton(title: "清空全部最近截图…", target: self, action: #selector(clearScreenshotHistory))
+        clear.bezelStyle = .rounded
+        return vertical([
+            screenshotHistoryCheckbox,
+            secondary("开启后会把普通截图、横向长图和纵向长图的原始底图与标注工程保存在本机。最长 30 天、最多 100 条、总容量最多 2GB。关闭后不再新增或更新，已有记录默认保留。"),
+            clear
+        ])
     }
 
     private func clipboardView() -> NSView {
@@ -181,8 +204,8 @@ final class PreferencesWindowController: NSWindowController {
     }
 
     private func aboutView() -> NSView {
-        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.8.0"
-        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "13"
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.9.0"
+        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "14"
         return vertical([label("横截 \(version) (\(build))"), secondary("原生 macOS 截图工具 · MIT License\nApple Silicon · macOS 14 或更高版本")])
     }
 
@@ -257,6 +280,7 @@ final class PreferencesWindowController: NSWindowController {
         let bindings = recorders.compactMapValues(\.binding)
         guard Set(bindings.values).count == bindings.count else { validateShortcutDraft(); NSSound.beep(); return }
         let enableHistory = historyCheckbox.state == .on
+        let enableScreenshotHistory = screenshotHistoryCheckbox.state == .on
         if enableHistory && !AppPreferences.shared.clipboardHistoryConsentCompleted {
             let alert = NSAlert()
             alert.messageText = "启用剪贴板历史？"
@@ -265,6 +289,15 @@ final class PreferencesWindowController: NSWindowController {
             alert.addButton(withTitle: "取消")
             guard alert.runModal() == .alertFirstButtonReturn else { return }
             AppPreferences.shared.clipboardHistoryConsentCompleted = true
+        }
+        if enableScreenshotHistory && !AppPreferences.shared.screenshotHistoryConsentCompleted {
+            let alert = NSAlert()
+            alert.messageText = "启用最近截图？"
+            alert.informativeText = "横截会把新截图的原始底图和可编辑标注图层保存在本机。GIF、OCR、钉图和剪贴板内容不会进入最近截图。"
+            alert.addButton(withTitle: "同意并启用")
+            alert.addButton(withTitle: "取消")
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+            AppPreferences.shared.screenshotHistoryConsentCompleted = true
         }
         switch onApplyHotKeys(bindings) {
         case let .failure(error):
@@ -280,6 +313,19 @@ final class PreferencesWindowController: NSWindowController {
         if let value = bindings["history"] { AppPreferences.shared.historyBinding = value }
         AppPreferences.shared.disabledHotKeys = Set(recorders.keys.filter { recorders[$0]?.binding == nil })
         AppPreferences.shared.clipboardHistoryEnabled = enableHistory
+        if AppPreferences.shared.screenshotHistoryEnabled && !enableScreenshotHistory {
+            let alert = NSAlert()
+            alert.messageText = "关闭截图历史记录？"
+            alert.informativeText = "关闭后不再保存新截图或更新草稿。已有记录可以保留，也可以立即全部清空。"
+            alert.addButton(withTitle: "关闭并保留")
+            alert.addButton(withTitle: "关闭并清空")
+            alert.addButton(withTitle: "取消")
+            let response = alert.runModal()
+            if response == .alertThirdButtonReturn { return }
+            if response == .alertSecondButtonReturn { onClearScreenshotHistory() }
+        }
+        AppPreferences.shared.screenshotHistoryEnabled = enableScreenshotHistory
+        AppPreferences.shared.delayedCaptureSeconds = [3, 5, 10][max(0, delayPopup.indexOfSelectedItem)]
         AppPreferences.shared.saveFormat = (formatPopup.titleOfSelectedItem ?? "PNG").lowercased()
         do { try AppPreferences.shared.setLaunchAtLogin(loginCheckbox.state == .on) }
         catch {
@@ -298,6 +344,15 @@ final class PreferencesWindowController: NSWindowController {
         alert.addButton(withTitle: "全部清空")
         alert.addButton(withTitle: "取消")
         if alert.runModal() == .alertFirstButtonReturn { onClearHistory() }
+    }
+
+    @objc private func clearScreenshotHistory() {
+        let alert = NSAlert()
+        alert.messageText = "清空全部最近截图？"
+        alert.informativeText = "底图、缩略图和可编辑标注工程都会被删除，此操作无法撤销。"
+        alert.addButton(withTitle: "全部清空")
+        alert.addButton(withTitle: "取消")
+        if alert.runModal() == .alertFirstButtonReturn { onClearScreenshotHistory() }
     }
 
     @objc private func exportDiagnostics() { DiagnosticBundleExporter.present() }

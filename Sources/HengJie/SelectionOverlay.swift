@@ -1,11 +1,17 @@
 import AppKit
 import HengJieCore
 
+enum SelectionConstraint: Equatable {
+    case free
+    case aspectRatio(CGFloat)
+    case fixedPixels(CGSize)
+}
+
 @MainActor
 final class SelectionOverlayController: NSWindowController {
     private let completion: (CGRect?) -> Void
 
-    init(completion: @escaping (CGRect?) -> Void) {
+    init(allowsConstraints: Bool = true, completion: @escaping (CGRect?) -> Void) {
         self.completion = completion
         let union = NSScreen.screens.map(\.frame).reduce(CGRect.null) { $0.union($1) }
         let panel = NSPanel(
@@ -22,7 +28,7 @@ final class SelectionOverlayController: NSWindowController {
         panel.ignoresMouseEvents = false
         panel.acceptsMouseMovedEvents = true
         super.init(window: panel)
-        let view = SelectionOverlayView(frame: CGRect(origin: .zero, size: union.size))
+        let view = SelectionOverlayView(frame: CGRect(origin: .zero, size: union.size), allowsConstraints: allowsConstraints)
         view.onComplete = { [weak self] localRect in
             guard let self, let window = self.window else { return }
             let globalRect = localRect.offsetBy(dx: window.frame.minX, dy: window.frame.minY)
@@ -55,6 +61,23 @@ final class SelectionOverlayView: NSView {
     private var cursorPoint = CGPoint.zero
     private var hoveredWindowRect: CGRect?
     private var phase: SelectionPhase = .idle
+    private var constraint: SelectionConstraint = .free
+    private weak var constraintBar: SelectionConstraintBar?
+
+    init(frame frameRect: NSRect, allowsConstraints: Bool) {
+        super.init(frame: frameRect)
+        if allowsConstraints {
+            let bar = SelectionConstraintBar(frame: CGRect(x: 20, y: frameRect.height - 54, width: 590, height: 40))
+            bar.onChange = { [weak self] value in
+                self?.constraint = value
+                self?.needsDisplay = true
+            }
+            addSubview(bar)
+            constraintBar = bar
+        }
+    }
+
+    required init?(coder: NSCoder) { nil }
 
     override var acceptsFirstResponder: Bool { true }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
@@ -63,6 +86,7 @@ final class SelectionOverlayView: NSView {
         super.viewDidMoveToWindow()
         if let location = window?.mouseLocationOutsideOfEventStream {
             cursorPoint = convert(location, from: nil)
+            positionConstraintBar(near: cursorPoint)
             needsDisplay = true
         }
     }
@@ -79,7 +103,7 @@ final class SelectionOverlayView: NSView {
     }
 
     override func mouseDragged(with event: NSEvent) {
-        current = convert(event.locationInWindow, from: nil)
+        current = constrainedPoint(convert(event.locationInWindow, from: nil))
         cursorPoint = current ?? .zero
         needsDisplay = true
     }
@@ -91,8 +115,19 @@ final class SelectionOverlayView: NSView {
     }
 
     override func mouseUp(with event: NSEvent) {
-        current = convert(event.locationInWindow, from: nil)
+        current = constrainedPoint(convert(event.locationInWindow, from: nil))
         let rect = selectionRect.integral
+        if !bounds.contains(rect) {
+            let alert = NSAlert()
+            alert.messageText = "固定选区超出屏幕"
+            alert.informativeText = "请缩小固定尺寸，或从更靠近屏幕中央的位置开始框选。"
+            alert.runModal()
+            phase = .idle
+            start = nil
+            current = nil
+            needsDisplay = true
+            return
+        }
         if rect.width >= 4, rect.height >= 4 {
             phase = .selected
             onComplete?(rect)
@@ -120,6 +155,44 @@ final class SelectionOverlayView: NSView {
         )
     }
 
+    private func constrainedPoint(_ raw: CGPoint) -> CGPoint {
+        guard let start else { return raw }
+        let dx = raw.x - start.x
+        let dy = raw.y - start.y
+        let signX: CGFloat = dx < 0 ? -1 : 1
+        let signY: CGFloat = dy < 0 ? -1 : 1
+        switch constraint {
+        case .free:
+            return raw
+        case let .aspectRatio(ratio):
+            guard ratio > 0 else { return raw }
+            let size = PreciseSelectionRules.constrainedSize(deltaWidth: dx, deltaHeight: dy, aspectRatio: ratio)
+            return CGPoint(x: start.x + size.width * signX, y: start.y + size.height * signY)
+        case let .fixedPixels(pixelSize):
+            let scale = backingScale(at: start)
+            let size = PreciseSelectionRules.logicalSize(pixelSize: pixelSize, backingScale: scale)
+            return CGPoint(
+                x: start.x + size.width * signX,
+                y: start.y + size.height * signY
+            )
+        }
+    }
+
+    private func backingScale(at localPoint: CGPoint) -> CGFloat {
+        guard let window else { return 1 }
+        let global = window.convertPoint(toScreen: localPoint)
+        return NSScreen.screens.first(where: { $0.frame.contains(global) })?.backingScaleFactor ?? 1
+    }
+
+    private func positionConstraintBar(near localPoint: CGPoint) {
+        guard let bar = constraintBar, let window else { return }
+        let global = window.convertPoint(toScreen: localPoint)
+        guard let screen = NSScreen.screens.first(where: { $0.frame.contains(global) }) ?? NSScreen.main else { return }
+        let localScreen = screen.frame.offsetBy(dx: -window.frame.minX, dy: -window.frame.minY)
+        let x = min(localScreen.maxX - bar.frame.width - 12, max(localScreen.minX + 12, localPoint.x - bar.frame.width / 2))
+        bar.setFrameOrigin(CGPoint(x: x, y: localScreen.maxY - bar.frame.height - 12))
+    }
+
     override func draw(_ dirtyRect: NSRect) {
         if SelectionDimmingPolicy.shouldDim(phase) {
             NSColor.black.withAlphaComponent(0.30).setFill()
@@ -142,7 +215,8 @@ final class SelectionOverlayView: NSView {
             border.lineWidth = 2
             border.stroke()
 
-            let label = "\(Int(rect.width)) × \(Int(rect.height))"
+            let scale = backingScale(at: start ?? rect.origin)
+            let label = "\(Int(rect.width)) × \(Int(rect.height)) pt · \(Int(rect.width * scale)) × \(Int(rect.height * scale)) px"
             let attributes: [NSAttributedString.Key: Any] = [
                 .font: NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .medium),
                 .foregroundColor: NSColor.white,
@@ -202,5 +276,81 @@ final class SelectionOverlayView: NSView {
             }
         }
         return nil
+    }
+}
+
+@MainActor
+private final class SelectionConstraintBar: NSVisualEffectView {
+    var onChange: ((SelectionConstraint) -> Void)?
+    private let mode = NSPopUpButton()
+    private let first = NSTextField(string: "16")
+    private let second = NSTextField(string: "9")
+    private let separator = NSTextField(labelWithString: ":")
+    private let applyButton = NSButton(title: "应用", target: nil, action: nil)
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        material = .hudWindow
+        blendingMode = .withinWindow
+        state = .active
+        wantsLayer = true
+        layer?.cornerRadius = 8
+        mode.addItems(withTitles: ["自由选区", "1:1", "4:3", "16:9", "自定义比例", "固定像素"])
+        mode.target = self
+        mode.action = #selector(modeChanged)
+        for field in [first, second] {
+            field.alignment = .center
+            field.translatesAutoresizingMaskIntoConstraints = false
+            field.widthAnchor.constraint(equalToConstant: 64).isActive = true
+            field.isHidden = true
+        }
+        separator.isHidden = true
+        applyButton.target = self
+        applyButton.action = #selector(applyCustom)
+        applyButton.bezelStyle = .rounded
+        applyButton.controlSize = .small
+        applyButton.isHidden = true
+        let hint = NSTextField(labelWithString: "左键拖动框选 · 右键或 Esc 取消")
+        hint.textColor = .secondaryLabelColor
+        hint.font = .systemFont(ofSize: 11)
+        let stack = NSStackView(views: [mode, first, separator, second, applyButton, hint])
+        stack.alignment = .centerY
+        stack.spacing = 7
+        stack.edgeInsets = NSEdgeInsets(top: 6, left: 8, bottom: 6, right: 8)
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor), stack.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor),
+            stack.topAnchor.constraint(equalTo: topAnchor), stack.bottomAnchor.constraint(equalTo: bottomAnchor)
+        ])
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    @objc private func modeChanged() {
+        let custom = mode.indexOfSelectedItem >= 4
+        first.isHidden = !custom
+        second.isHidden = !custom
+        separator.isHidden = !custom
+        applyButton.isHidden = !custom
+        separator.stringValue = mode.indexOfSelectedItem == 5 ? "×" : ":"
+        if mode.indexOfSelectedItem == 5 { first.stringValue = "1920"; second.stringValue = "1080" }
+        else if mode.indexOfSelectedItem == 4 { first.stringValue = "16"; second.stringValue = "9" }
+        switch mode.indexOfSelectedItem {
+        case 0: onChange?(.free)
+        case 1: onChange?(.aspectRatio(1))
+        case 2: onChange?(.aspectRatio(4.0 / 3.0))
+        case 3: onChange?(.aspectRatio(16.0 / 9.0))
+        default: break
+        }
+    }
+
+    @objc private func applyCustom() {
+        guard let a = Double(first.stringValue), let b = Double(second.stringValue), a > 0, b > 0 else {
+            NSSound.beep()
+            return
+        }
+        if mode.indexOfSelectedItem == 5 { onChange?(.fixedPixels(CGSize(width: a, height: b))) }
+        else { onChange?(.aspectRatio(CGFloat(a / b))) }
     }
 }

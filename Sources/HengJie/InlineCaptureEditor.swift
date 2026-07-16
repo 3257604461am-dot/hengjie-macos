@@ -7,7 +7,7 @@ final class StandardCaptureOverlayController: NSWindowController {
     private let completion: () -> Void
     private var state: State = .editing
 
-    init(image: CGImage, globalRect: CGRect, completion: @escaping () -> Void) {
+    init(image: CGImage, globalRect: CGRect, historyID: UUID? = nil, completion: @escaping () -> Void) {
         self.completion = completion
         let union = NSScreen.screens.map(\.frame).reduce(CGRect.null) { $0.union($1) }
         let panel = CapturePanel(contentRect: union, styleMask: [.borderless], backing: .buffered, defer: false)
@@ -20,9 +20,13 @@ final class StandardCaptureOverlayController: NSWindowController {
         super.init(window: panel)
         let localRect = globalRect.offsetBy(dx: -union.minX, dy: -union.minY)
         let editor = InlineEditingOverlayView(frame: CGRect(origin: .zero, size: union.size), image: image, selectionRect: localRect)
-        editor.onFinish = { [weak self] image in
+        editor.onFinish = { [weak self] image, annotations in
             ImageExport.copy(image)
+            if let historyID { ScreenshotHistoryService.shared.complete(id: historyID, annotations: annotations) }
             self?.finish()
+        }
+        editor.onProjectChange = { annotations in
+            if let historyID { ScreenshotHistoryService.shared.scheduleUpdate(id: historyID, annotations: annotations) }
         }
         editor.onCancel = { [weak self] in self?.cancel() }
         panel.contentView = editor
@@ -59,8 +63,9 @@ private final class CapturePanel: NSPanel {
 
 @MainActor
 final class InlineEditingOverlayView: NSView {
-    var onFinish: ((NSImage) -> Void)?
+    var onFinish: ((NSImage, [AnnotationMarkRecord]) -> Void)?
     var onCancel: (() -> Void)?
+    var onProjectChange: (([AnnotationMarkRecord]) -> Void)?
     private let canvas: AnnotationCanvas
     private let selectionRect: CGRect
     private let toolbar: InlineAnnotationToolbar
@@ -76,9 +81,13 @@ final class InlineEditingOverlayView: NSView {
         positionToolbar()
         toolbar.onFinish = { [weak self] in
             guard let self else { return }
-            self.onFinish?(self.canvas.renderedImage())
+            self.onFinish?(self.canvas.renderedImage(), self.canvas.annotationRecords())
         }
         toolbar.onCancel = { [weak self] in self?.onCancel?() }
+        canvas.onHistoryChange = { [weak self] in
+            guard let self else { return }
+            self.onProjectChange?(self.canvas.annotationRecords())
+        }
     }
 
     required init?(coder: NSCoder) { nil }
@@ -86,7 +95,7 @@ final class InlineEditingOverlayView: NSView {
 
     override func keyDown(with event: NSEvent) {
         if event.keyCode == 53 { onCancel?() }
-        else if event.keyCode == 36 { onFinish?(canvas.renderedImage()) }
+        else if event.keyCode == 36 { onFinish?(canvas.renderedImage(), canvas.annotationRecords()) }
         else { super.keyDown(with: event) }
     }
 
@@ -130,6 +139,7 @@ final class InlineAnnotationToolbar: NSVisualEffectView {
         layer?.cornerRadius = 9
         buildUI()
         canvas.textProvider = { AnnotationEditorWindowController.requestText(title: "添加文字", prompt: "输入要标注的文字") }
+        canvas.textEditProvider = { value in AnnotationEditorWindowController.requestText(title: "编辑文字", prompt: "修改标注文字", initialValue: value) }
     }
 
     required init?(coder: NSCoder) { nil }
@@ -142,7 +152,7 @@ final class InlineAnnotationToolbar: NSVisualEffectView {
             let button = makeButton(tool.title, #selector(selectTool(_:)))
             button.identifier = NSUserInterfaceItemIdentifier(tool.rawValue)
             button.setButtonType(.toggle)
-            button.state = tool == .arrow ? .on : .off
+            button.state = tool == .select ? .on : .off
             toolButtons.append(button)
             tools.addArrangedSubview(button)
         }
@@ -161,6 +171,7 @@ final class InlineAnnotationToolbar: NSVisualEffectView {
         actions.spacing = 5
         [
             makeButton("撤销", #selector(undo)), makeButton("重做", #selector(redo)),
+            makeButton("删除标注", #selector(deleteSelected)),
             makeButton("水印", #selector(addWatermark)), makeButton("OCR", #selector(recognizeText)),
             makeButton("保存", #selector(saveImage)),
             makeButton("取消", #selector(cancel)), makeButton("完成", #selector(finish))
@@ -192,9 +203,14 @@ final class InlineAnnotationToolbar: NSVisualEffectView {
         canvas.selectedTool = tool
         toolButtons.forEach { $0.state = $0 === sender ? .on : .off }
     }
-    @objc private func updateStyle() { canvas.selectedColor = colorWell.color; canvas.selectedLineWidth = CGFloat(widthSlider.doubleValue) }
+    @objc private func updateStyle() {
+        canvas.selectedColor = colorWell.color
+        canvas.selectedLineWidth = CGFloat(widthSlider.doubleValue)
+        canvas.applyStyleToSelection(color: colorWell.color, lineWidth: CGFloat(widthSlider.doubleValue))
+    }
     @objc private func undo() { canvas.undo() }
     @objc private func redo() { canvas.redo() }
+    @objc private func deleteSelected() { canvas.deleteSelectedMark() }
     @objc private func addWatermark() {
         if let text = AnnotationEditorWindowController.requestText(title: "添加水印", prompt: "水印将以半透明方式平铺") { canvas.addWatermark(text) }
     }

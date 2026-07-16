@@ -1,8 +1,9 @@
 import AppKit
 
 @MainActor
-final class ClipboardHistoryWindowController: NSWindowController, NSWindowDelegate, NSTableViewDataSource, NSTableViewDelegate, NSSearchFieldDelegate {
+final class ClipboardHistoryWindowController: NSWindowController, NSWindowDelegate, NSTableViewDataSource, NSTableViewDelegate, NSSearchFieldDelegate, NSMenuDelegate {
     private let service: ClipboardHistoryService
+    private let onEditImage: (CGImage) -> Void
     private let tableView = ClipboardHistoryTableView()
     private let statusLabel = NSTextField(wrappingLabelWithString: "")
     private let searchField = NSSearchField()
@@ -10,8 +11,9 @@ final class ClipboardHistoryWindowController: NSWindowController, NSWindowDelega
     private let timePopup = NSPopUpButton()
     private var displayedItems: [ClipboardHistoryItem] = []
 
-    init(service: ClipboardHistoryService) {
+    init(service: ClipboardHistoryService, onEditImage: @escaping (CGImage) -> Void) {
         self.service = service
+        self.onEditImage = onEditImage
         let panel = NSPanel(
             contentRect: CGRect(x: 0, y: 0, width: 430, height: 520),
             styleMask: [.titled, .closable, .utilityWindow],
@@ -69,6 +71,13 @@ final class ClipboardHistoryWindowController: NSWindowController, NSWindowDelega
         tableView.action = #selector(copySelected)
         tableView.onConfirm = { [weak self] in self?.copyCurrentSelection() }
         tableView.onCancel = { [weak self] in self?.window?.orderOut(nil) }
+        let contextMenu = NSMenu()
+        contextMenu.addItem(withTitle: "编辑图片", action: #selector(editSelectedImage), keyEquivalent: "")
+        contextMenu.addItem(withTitle: "复制", action: #selector(copySelected), keyEquivalent: "")
+        contextMenu.addItem(withTitle: "删除", action: #selector(deleteSelectedFromMenu), keyEquivalent: "")
+        contextMenu.items.forEach { $0.target = self }
+        contextMenu.delegate = self
+        tableView.menu = contextMenu
         let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("history"))
         column.width = 390
         tableView.addTableColumn(column)
@@ -181,6 +190,35 @@ final class ClipboardHistoryWindowController: NSWindowController, NSWindowDelega
         service.delete(displayedItems[sender.tag].id)
     }
 
+    @objc func editItem(_ sender: NSButton) {
+        guard displayedItems.indices.contains(sender.tag) else { return }
+        openImageEditor(displayedItems[sender.tag])
+    }
+
+    @objc private func editSelectedImage() {
+        let row = tableView.selectedRow
+        guard displayedItems.indices.contains(row) else { return }
+        openImageEditor(displayedItems[row])
+    }
+
+    @objc private func deleteSelectedFromMenu() {
+        let row = tableView.selectedRow
+        guard displayedItems.indices.contains(row) else { return }
+        service.delete(displayedItems[row].id)
+    }
+
+    private func openImageEditor(_ item: ClipboardHistoryItem) {
+        guard item.kind == .image else { NSSound.beep(); return }
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                let image = try await service.loadImage(item)
+                window?.orderOut(nil)
+                onEditImage(image)
+            } catch { NSAlert(error: error).runModal() }
+        }
+    }
+
     @objc private func clearUnpinned() {
         guard service.items.contains(where: { !$0.isPinned }) else { return }
         let alert = NSAlert()
@@ -194,6 +232,12 @@ final class ClipboardHistoryWindowController: NSWindowController, NSWindowDelega
     @objc private func filterChanged() { reload() }
 
     func controlTextDidChange(_ obj: Notification) { reload() }
+
+    func menuWillOpen(_ menu: NSMenu) {
+        let row = tableView.selectedRow
+        let isImage = displayedItems.indices.contains(row) && displayedItems[row].kind == .image
+        menu.items.first(where: { $0.action == #selector(editSelectedImage) })?.isHidden = !isImage
+    }
 }
 
 private final class ClipboardHistoryTableView: NSTableView {
@@ -207,6 +251,12 @@ private final class ClipboardHistoryTableView: NSTableView {
         default: super.keyDown(with: event)
         }
     }
+
+    override func menu(for event: NSEvent) -> NSMenu? {
+        let row = self.row(at: convert(event.locationInWindow, from: nil))
+        if row >= 0 { selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false) }
+        return super.menu(for: event)
+    }
 }
 
 private final class ClipboardHistoryCellView: NSTableCellView {
@@ -214,6 +264,7 @@ private final class ClipboardHistoryCellView: NSTableCellView {
     private let titleLabel = NSTextField(labelWithString: "")
     private let detailLabel = NSTextField(labelWithString: "")
     private let pinButton = NSButton()
+    private let editButton = NSButton()
     private let deleteButton = NSButton()
 
     init(identifier: NSUserInterfaceItemIdentifier) {
@@ -230,11 +281,15 @@ private final class ClipboardHistoryCellView: NSTableCellView {
         pinButton.isBordered = false
         pinButton.imagePosition = .imageOnly
         pinButton.toolTip = "固定/取消固定"
+        editButton.isBordered = false
+        editButton.imagePosition = .imageOnly
+        editButton.image = NSImage(systemSymbolName: "pencil", accessibilityDescription: "编辑图片")
+        editButton.toolTip = "打开图片编辑"
         deleteButton.isBordered = false
         deleteButton.imagePosition = .imageOnly
         deleteButton.image = NSImage(systemSymbolName: "trash", accessibilityDescription: "删除")
         deleteButton.toolTip = "删除"
-        [preview, titleLabel, detailLabel, pinButton, deleteButton].forEach(addSubview)
+        [preview, titleLabel, detailLabel, pinButton, editButton, deleteButton].forEach(addSubview)
     }
 
     required init?(coder: NSCoder) { nil }
@@ -249,6 +304,10 @@ private final class ClipboardHistoryCellView: NSTableCellView {
         pinButton.tag = row
         pinButton.target = target
         pinButton.action = #selector(ClipboardHistoryWindowController.togglePin(_:))
+        editButton.isHidden = item.kind != .image
+        editButton.tag = row
+        editButton.target = target
+        editButton.action = #selector(ClipboardHistoryWindowController.editItem(_:))
         deleteButton.tag = row
         deleteButton.target = target
         deleteButton.action = #selector(ClipboardHistoryWindowController.deleteItem(_:))
@@ -265,7 +324,8 @@ private final class ClipboardHistoryCellView: NSTableCellView {
         preview.frame = CGRect(x: 8, y: 8, width: 54, height: max(40, height - 16))
         deleteButton.frame = CGRect(x: bounds.width - 31, y: (height - 24) / 2, width: 24, height: 24)
         pinButton.frame = CGRect(x: deleteButton.frame.minX - 29, y: deleteButton.frame.minY, width: 24, height: 24)
-        let textWidth = max(30, pinButton.frame.minX - 74)
+        editButton.frame = CGRect(x: pinButton.frame.minX - 29, y: pinButton.frame.minY, width: 24, height: 24)
+        let textWidth = max(30, editButton.frame.minX - 74)
         titleLabel.frame = CGRect(x: 72, y: height / 2 - 2, width: textWidth, height: 34)
         detailLabel.frame = CGRect(x: 72, y: 9, width: textWidth, height: 16)
     }

@@ -21,6 +21,9 @@ final class AppPreferences {
         static let disabledHotKeys = "disabledHotKeys"
         static let clipboardHistoryEnabled = "clipboardHistoryEnabled"
         static let clipboardHistoryConsentCompleted = "clipboardHistoryConsentCompleted"
+        static let screenshotHistoryEnabled = "screenshotHistoryEnabled"
+        static let screenshotHistoryConsentCompleted = "screenshotHistoryConsentCompleted"
+        static let delayedCaptureSeconds = "delayedCaptureSeconds"
         static let gifFramesPerSecond = "gifFramesPerSecond"
         static let gifQuality = "gifQuality"
         static let gifShowsCursor = "gifShowsCursor"
@@ -139,6 +142,24 @@ final class AppPreferences {
     var clipboardHistoryConsentCompleted: Bool {
         get { UserDefaults.standard.bool(forKey: Key.clipboardHistoryConsentCompleted) }
         set { UserDefaults.standard.set(newValue, forKey: Key.clipboardHistoryConsentCompleted) }
+    }
+
+    var screenshotHistoryEnabled: Bool {
+        get { UserDefaults.standard.bool(forKey: Key.screenshotHistoryEnabled) }
+        set { UserDefaults.standard.set(newValue, forKey: Key.screenshotHistoryEnabled) }
+    }
+
+    var screenshotHistoryConsentCompleted: Bool {
+        get { UserDefaults.standard.bool(forKey: Key.screenshotHistoryConsentCompleted) }
+        set { UserDefaults.standard.set(newValue, forKey: Key.screenshotHistoryConsentCompleted) }
+    }
+
+    var delayedCaptureSeconds: Int {
+        get {
+            let value = UserDefaults.standard.object(forKey: Key.delayedCaptureSeconds) as? Int ?? 3
+            return [3, 5, 10].contains(value) ? value : 3
+        }
+        set { UserDefaults.standard.set([3, 5, 10].contains(newValue) ? newValue : 3, forKey: Key.delayedCaptureSeconds) }
     }
 
     var gifFramesPerSecond: Int {

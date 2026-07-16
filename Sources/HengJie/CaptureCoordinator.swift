@@ -9,6 +9,8 @@ final class CaptureCoordinator {
     private var pinSelectionController: SelectionOverlayController?
     private var textSelectionController: SelectionOverlayController?
     private var standardController: StandardCaptureOverlayController?
+    private var delayedSelectionController: SelectionOverlayController?
+    private var delayedCaptureController: DelayedCaptureController?
     private var editorControllers: [AnnotationEditorWindowController] = []
     private var scrollController: ScrollCaptureController?
     private var gifSelectionController: SelectionOverlayController?
@@ -35,6 +37,27 @@ final class CaptureCoordinator {
             else { self?.captureScrolling(rect, mode: mode) }
         }
         selectionController = selection
+        selection.begin()
+    }
+
+    func beginDelayedCapture() {
+        guard allowCaptureWhileNotRecordingGIF() else { return }
+        guard ensureCapturePermission() else { return }
+        let selection = SelectionOverlayController { [weak self] rect in
+            guard let self else { return }
+            delayedSelectionController = nil
+            guard let rect else { return }
+            let countdown = DelayedCaptureController(selectionRect: rect)
+            countdown.onReady = { [weak self, weak countdown] in
+                self?.delayedCaptureController = nil
+                countdown?.onReady = nil
+                self?.captureStandard(rect, waitForOverlay: false)
+            }
+            countdown.onCancel = { [weak self] in self?.delayedCaptureController = nil }
+            delayedCaptureController = countdown
+            countdown.present()
+        }
+        delayedSelectionController = selection
         selection.begin()
     }
 
@@ -245,12 +268,13 @@ final class CaptureCoordinator {
         return true
     }
 
-    private func captureStandard(_ rect: CGRect) {
+    private func captureStandard(_ rect: CGRect, waitForOverlay: Bool = true) {
         Task {
-            try? await Task.sleep(for: .milliseconds(100))
+            if waitForOverlay { try? await Task.sleep(for: .milliseconds(100)) }
             do {
                 let image = try await service.capture(globalRect: rect)
-                let controller = StandardCaptureOverlayController(image: image, globalRect: rect) { [weak self] in
+                let historyID = await ScreenshotHistoryService.shared.create(image: image, displaySize: rect.size, kind: .standard)
+                let controller = StandardCaptureOverlayController(image: image, globalRect: rect, historyID: historyID) { [weak self] in
                     self?.standardController = nil
                 }
                 standardController = controller
@@ -293,7 +317,7 @@ final class CaptureCoordinator {
             let controller = try ScrollCaptureController(rect: rect, axis: axis, captureService: service) { [weak self] result in
                 self?.scrollController = nil
                 switch result {
-                case let .success(image): self?.presentEditor(image)
+                case let .success(image): self?.presentEditor(image, kind: mode == .horizontal ? .horizontal : .vertical)
                 case let .failure(error) where error is CancellationError: break
                 case let .failure(error): self?.show(error)
                 }
@@ -305,8 +329,35 @@ final class CaptureCoordinator {
         }
     }
 
-    private func presentEditor(_ image: CGImage) {
-        let controller = AnnotationEditorWindowController(image: image, presentationMode: .fitToWindow) { [weak self] controller in
+    private func presentEditor(_ image: CGImage, kind: ScreenshotHistoryKind? = nil) {
+        Task { [weak self] in
+            guard let self else { return }
+            let displaySize = CGSize(width: image.width, height: image.height)
+            let historyID: UUID? = if let kind {
+                await ScreenshotHistoryService.shared.create(image: image, displaySize: displaySize, kind: kind)
+            } else { nil }
+            presentEditor(image: image, displaySize: displaySize, annotations: [], historyID: historyID)
+        }
+    }
+
+    func editScreenshotProject(_ loaded: LoadedScreenshotProject) {
+        presentEditor(
+            image: loaded.image,
+            displaySize: CGSize(width: loaded.project.displayWidth, height: loaded.project.displayHeight),
+            annotations: loaded.project.annotations,
+            historyID: loaded.item.id
+        )
+    }
+
+    func editClipboardImage(_ image: CGImage) {
+        guard allowCaptureWhileNotRecordingGIF() else { return }
+        presentEditor(image: image, displaySize: CGSize(width: image.width, height: image.height), annotations: [], historyID: nil)
+    }
+
+    private func presentEditor(image: CGImage, displaySize: CGSize, annotations: [AnnotationMarkRecord], historyID: UUID?) {
+        let controller = AnnotationEditorWindowController(
+            image: image, displaySize: displaySize, annotations: annotations, historyID: historyID, presentationMode: .fitToWindow
+        ) { [weak self] controller in
             self?.editorControllers.removeAll { $0 === controller }
         }
         editorControllers.append(controller)
