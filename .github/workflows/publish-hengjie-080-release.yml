@@ -1,6 +1,7 @@
 name: Publish HengJie 0.8.0 Release
 
 on:
+  workflow_dispatch:
   push:
     paths:
       - '.github/workflows/publish-hengjie-080-release.yml'
