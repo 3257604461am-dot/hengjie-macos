@@ -26,6 +26,20 @@ enum ClipboardHistoryKind: String, Codable, Sendable {
     }
 }
 
+enum ClipboardHistoryImageError: LocalizedError {
+    case notImage
+    case missingPayload
+    case invalidImage
+
+    var errorDescription: String? {
+        switch self {
+        case .notImage: "这条剪贴板记录不是静态图片。"
+        case .missingPayload: "图片原始数据已丢失，无法打开编辑。"
+        case .invalidImage: "图片格式已损坏或无法解码。"
+        }
+    }
+}
+
 enum ClipboardHistoryFilter: Int, CaseIterable {
     case all, text, link, image, pinned
 
@@ -425,6 +439,19 @@ final class ClipboardHistoryService {
             if let image { imageCache.setObject(image, forKey: item.id as NSUUID, cost: data?.count ?? 0) }
             completion(image)
         }
+    }
+
+    func loadImage(_ item: ClipboardHistoryItem) async throws -> CGImage {
+        guard item.kind == .image else { throw ClipboardHistoryImageError.notImage }
+        let values = await store.readPayload(item)
+        guard !values.isEmpty else { throw ClipboardHistoryImageError.missingPayload }
+        for (_, data) in values {
+            guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+                  CGImageSourceGetCount(source) > 0,
+                  let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else { continue }
+            return image
+        }
+        throw ClipboardHistoryImageError.invalidImage
     }
 
     func togglePinned(_ id: UUID) {

@@ -214,6 +214,19 @@ func runChecks() throws {
         try expect(ClipboardHistoryRules.matches(searchText: "ＡＢＣ １２３", query: "abc 123"), "全角半角搜索错误")
         try expect(!ClipboardHistoryRules.matches(searchText: "横截截图", query: "横截 翻译"), "多关键词搜索必须全部命中")
     }
+    do {
+        let square = PreciseSelectionRules.constrainedSize(deltaWidth: 320, deltaHeight: 100, aspectRatio: 1)
+        try expect(square == CGSize(width: 320, height: 320), "1:1 固定比例计算错误")
+        let widescreen = PreciseSelectionRules.constrainedSize(deltaWidth: 160, deltaHeight: 200, aspectRatio: 16.0 / 9.0)
+        try expect(abs(widescreen.width - 355.5555) < 0.01 && widescreen.height == 200, "16:9 固定比例计算错误")
+        let retina = PreciseSelectionRules.logicalSize(pixelSize: CGSize(width: 1920, height: 1080), backingScale: 2)
+        try expect(retina == CGSize(width: 960, height: 540), "Retina 固定像素换算错误")
+        let now = Date()
+        try expect(ScreenshotHistoryRetentionRules.isExpired(updatedAt: now.addingTimeInterval(-31 * 24 * 60 * 60), now: now), "截图历史 30 天清理未生效")
+        try expect(!ScreenshotHistoryRetentionRules.exceedsCapacity(itemCount: 100, totalBytes: ScreenshotHistoryRetentionRules.maximumTotalBytes), "截图历史边界容量不应提前淘汰")
+        try expect(ScreenshotHistoryRetentionRules.exceedsCapacity(itemCount: 101, totalBytes: 0), "截图历史 100 条限制未生效")
+        try expect(ScreenshotHistoryRetentionRules.exceedsCapacity(itemCount: 1, totalBytes: ScreenshotHistoryRetentionRules.maximumTotalBytes + 1), "截图历史 2GB 限制未生效")
+    }
 }
 
 func overlay(frozen: CGImage, on image: CGImage) -> CGImage {
