@@ -19,7 +19,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let pinHotKey = GlobalHotKey(id: 2)
     private let textHotKey = GlobalHotKey(id: 3)
     private let gifHotKey = GlobalHotKey(id: 4)
+    private let historyHotKey = GlobalHotKey(id: 5)
     private let coordinator = CaptureCoordinator()
+    private let historyService = ClipboardHistoryService()
+    private lazy var historyController = ClipboardHistoryWindowController(service: historyService)
     private var preferencesController: PreferencesWindowController?
     private var gifMenuItem: NSMenuItem?
 
@@ -29,6 +32,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         pinHotKey.action = { [weak self] in self?.coordinator.beginPin() }
         textHotKey.action = { [weak self] in self?.coordinator.beginTextExtraction() }
         gifHotKey.action = { [weak self] in self?.coordinator.beginGIFRecording() }
+        historyHotKey.action = { [weak self] in self?.openClipboardHistory() }
         captureHotKey.register(
             keyCode: AppPreferences.shared.hotKeyCode,
             modifiers: AppPreferences.shared.hotKeyModifiers
@@ -45,6 +49,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             keyCode: AppPreferences.shared.gifHotKeyCode,
             modifiers: AppPreferences.shared.gifHotKeyModifiers
         )
+        historyHotKey.register(
+            keyCode: AppPreferences.shared.historyHotKeyCode,
+            modifiers: AppPreferences.shared.historyHotKeyModifiers
+        )
+        if AppPreferences.shared.clipboardHistoryEnabled && AppPreferences.shared.clipboardHistoryConsentCompleted {
+            historyService.start()
+        }
         coordinator.onGIFRecordingStateChange = { [weak self] recording in
             self?.gifMenuItem?.title = recording ? "停止 GIF 录制" : "录制 GIF"
         }
@@ -66,6 +77,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let gif = item("录制 GIF", #selector(recordGIF), "g", [.option, .shift])
         gifMenuItem = gif
         menu.addItem(gif)
+        menu.addItem(item("剪贴板历史", #selector(showClipboardHistory), "v", [.control, .shift]))
         menu.addItem(.separator())
         menu.addItem(item("权限检查…", #selector(checkPermissions)))
         menu.addItem(item("设置…", #selector(openPreferences)))
@@ -87,6 +99,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func pinRegion() { coordinator.beginPin() }
     @objc private func extractText() { coordinator.beginTextExtraction() }
     @objc private func recordGIF() { coordinator.beginGIFRecording() }
+    @objc private func showClipboardHistory() { openClipboardHistory() }
     @objc private func quit() { NSApplication.shared.terminate(nil) }
 
     @objc private func checkPermissions() {
@@ -94,13 +107,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func openPreferences() {
-        let controller = PreferencesWindowController { [weak self] in
+        let controller = PreferencesWindowController(onChange: { [weak self] in
             guard let self else { return }
             self.captureHotKey.register(keyCode: AppPreferences.shared.hotKeyCode, modifiers: AppPreferences.shared.hotKeyModifiers)
             self.pinHotKey.register(keyCode: AppPreferences.shared.pinHotKeyCode, modifiers: AppPreferences.shared.pinHotKeyModifiers)
             self.textHotKey.register(keyCode: AppPreferences.shared.textHotKeyCode, modifiers: AppPreferences.shared.textHotKeyModifiers)
             self.gifHotKey.register(keyCode: AppPreferences.shared.gifHotKeyCode, modifiers: AppPreferences.shared.gifHotKeyModifiers)
-        }
+            self.historyHotKey.register(keyCode: AppPreferences.shared.historyHotKeyCode, modifiers: AppPreferences.shared.historyHotKeyModifiers)
+            if AppPreferences.shared.clipboardHistoryEnabled { self.historyService.start() }
+            else { self.historyService.stop() }
+        }, onClearHistory: { [weak self] in self?.historyService.clearAll() })
         preferencesController = controller
         controller.showWindow(nil)
         NSApp.activate(ignoringOtherApps: true)
@@ -108,7 +124,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         coordinator.cancelGIFRecording()
+        historyService.stop()
         GIFTemporaryFiles.cleanupStaleFiles()
+    }
+
+    private func openClipboardHistory() {
+        if !AppPreferences.shared.clipboardHistoryConsentCompleted {
+            let alert = NSAlert()
+            alert.messageText = "启用剪贴板历史？"
+            alert.informativeText = "横截会从现在开始，把文字、链接、富文本和静态图片保存在本机，最长 30 天、最多 100 条。不会记录 GIF、文件、音视频及带密码或临时标记的内容；未正确标记的敏感内容仍可能被记录。当前剪贴板内容不会被导入。"
+            alert.addButton(withTitle: "同意并启用")
+            alert.addButton(withTitle: "取消")
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+            AppPreferences.shared.clipboardHistoryConsentCompleted = true
+            AppPreferences.shared.clipboardHistoryEnabled = true
+            historyService.start()
+        } else if !AppPreferences.shared.clipboardHistoryEnabled {
+            let alert = NSAlert()
+            alert.messageText = "剪贴板历史已关闭"
+            alert.informativeText = "是否重新启用？启用前已有的剪贴板内容不会被导入。"
+            alert.addButton(withTitle: "重新启用")
+            alert.addButton(withTitle: "取消")
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+            AppPreferences.shared.clipboardHistoryEnabled = true
+            historyService.start()
+        }
+        historyController.presentNearMouse()
     }
 
     private func showPermissionIntroduction() {

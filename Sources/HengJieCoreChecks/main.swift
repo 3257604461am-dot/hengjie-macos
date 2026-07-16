@@ -148,6 +148,25 @@ func runChecks() throws {
         try expect(GIFRecordingOptions(framesPerSecond: 0).framesPerSecond == 1, "GIF 最低帧率限制错误")
         try expect(GIFRecordingOptions(framesPerSecond: 60).framesPerSecond == 30, "GIF 最高帧率限制错误")
     }
+    do {
+        let now = Date()
+        let stale = now.addingTimeInterval(-31 * 24 * 60 * 60)
+        try expect(ClipboardHistoryRules.isExpired(lastUsedAt: stale, isPinned: false, now: now), "30 天历史清理未生效")
+        try expect(!ClipboardHistoryRules.isExpired(lastUsedAt: stale, isPinned: true, now: now), "固定历史不应自动过期")
+        try expect(!ClipboardHistoryRules.canAcceptItem(
+            itemBytes: ClipboardHistoryRules.maximumItemBytes + 1,
+            currentCount: 0,
+            currentBytes: 0,
+            hasEvictableItem: true
+        ), "超过 50MB 的剪贴板内容未被拒绝")
+        try expect(!ClipboardHistoryRules.canAcceptItem(
+            itemBytes: 10,
+            currentCount: ClipboardHistoryRules.maximumItemCount,
+            currentBytes: 100,
+            hasEvictableItem: false
+        ), "全固定且满 100 条时不应继续接收")
+        try expect(ClipboardHistoryRules.normalizedPreview("  第一行\n\n第二行  ") == "第一行 第二行", "历史摘要规范化错误")
+    }
 }
 
 func overlay(frozen: CGImage, on image: CGImage) -> CGImage {

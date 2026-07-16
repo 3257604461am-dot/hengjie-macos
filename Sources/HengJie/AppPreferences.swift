@@ -16,6 +16,10 @@ final class AppPreferences {
         static let textHotKeyModifiers = "textHotKeyModifiers"
         static let gifHotKeyCode = "gifHotKeyCode"
         static let gifHotKeyModifiers = "gifHotKeyModifiers"
+        static let historyHotKeyCode = "historyHotKeyCode"
+        static let historyHotKeyModifiers = "historyHotKeyModifiers"
+        static let clipboardHistoryEnabled = "clipboardHistoryEnabled"
+        static let clipboardHistoryConsentCompleted = "clipboardHistoryConsentCompleted"
         static let gifFramesPerSecond = "gifFramesPerSecond"
         static let gifQuality = "gifQuality"
         static let gifShowsCursor = "gifShowsCursor"
@@ -79,6 +83,26 @@ final class AppPreferences {
     var gifHotKeyModifiers: UInt32 {
         get { UInt32((UserDefaults.standard.object(forKey: Key.gifHotKeyModifiers) as? Int) ?? (optionKey | shiftKey)) }
         set { UserDefaults.standard.set(Int(newValue), forKey: Key.gifHotKeyModifiers) }
+    }
+
+    var historyHotKeyCode: UInt32 {
+        get { UInt32((UserDefaults.standard.object(forKey: Key.historyHotKeyCode) as? Int) ?? 9) } // ANSI V
+        set { UserDefaults.standard.set(Int(newValue), forKey: Key.historyHotKeyCode) }
+    }
+
+    var historyHotKeyModifiers: UInt32 {
+        get { UInt32((UserDefaults.standard.object(forKey: Key.historyHotKeyModifiers) as? Int) ?? (controlKey | shiftKey)) }
+        set { UserDefaults.standard.set(Int(newValue), forKey: Key.historyHotKeyModifiers) }
+    }
+
+    var clipboardHistoryEnabled: Bool {
+        get { UserDefaults.standard.bool(forKey: Key.clipboardHistoryEnabled) }
+        set { UserDefaults.standard.set(newValue, forKey: Key.clipboardHistoryEnabled) }
+    }
+
+    var clipboardHistoryConsentCompleted: Bool {
+        get { UserDefaults.standard.bool(forKey: Key.clipboardHistoryConsentCompleted) }
+        set { UserDefaults.standard.set(newValue, forKey: Key.clipboardHistoryConsentCompleted) }
     }
 
     var gifFramesPerSecond: Int {
