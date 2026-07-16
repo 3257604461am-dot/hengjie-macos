@@ -15,49 +15,44 @@ struct HengJieApp {
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
-    private let captureHotKey = GlobalHotKey(id: 1)
-    private let pinHotKey = GlobalHotKey(id: 2)
-    private let textHotKey = GlobalHotKey(id: 3)
-    private let gifHotKey = GlobalHotKey(id: 4)
-    private let historyHotKey = GlobalHotKey(id: 5)
+    private let hotKeyRegistry = GlobalHotKeyRegistry()
     private let coordinator = CaptureCoordinator()
     private let historyService = ClipboardHistoryService()
     private lazy var historyController = ClipboardHistoryWindowController(service: historyService)
     private var preferencesController: PreferencesWindowController?
-    private var gifMenuItem: NSMenuItem?
+    private lazy var menuPanel = MenuPanelController(actions: .init(
+        standard: { [weak self] in self?.standardCapture() },
+        vertical: { [weak self] in self?.verticalCapture() },
+        horizontal: { [weak self] in self?.horizontalCapture() },
+        pin: { [weak self] in self?.pinRegion() },
+        text: { [weak self] in self?.extractText() },
+        gif: { [weak self] in self?.recordGIF() },
+        history: { [weak self] in self?.showClipboardHistory() },
+        permissions: { [weak self] in self?.checkPermissions() },
+        preferences: { [weak self] in self?.openPreferences() },
+        diagnostics: { DiagnosticBundleExporter.present() },
+        quit: { NSApplication.shared.terminate(nil) }
+    ))
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         setupMenu()
-        captureHotKey.action = { [weak self] in self?.coordinator.begin(mode: .standard) }
-        pinHotKey.action = { [weak self] in self?.coordinator.beginPin() }
-        textHotKey.action = { [weak self] in self?.coordinator.beginTextExtraction() }
-        gifHotKey.action = { [weak self] in self?.coordinator.beginGIFRecording() }
-        historyHotKey.action = { [weak self] in self?.openClipboardHistory() }
-        captureHotKey.register(
-            keyCode: AppPreferences.shared.hotKeyCode,
-            modifiers: AppPreferences.shared.hotKeyModifiers
-        )
-        pinHotKey.register(
-            keyCode: AppPreferences.shared.pinHotKeyCode,
-            modifiers: AppPreferences.shared.pinHotKeyModifiers
-        )
-        textHotKey.register(
-            keyCode: AppPreferences.shared.textHotKeyCode,
-            modifiers: AppPreferences.shared.textHotKeyModifiers
-        )
-        gifHotKey.register(
-            keyCode: AppPreferences.shared.gifHotKeyCode,
-            modifiers: AppPreferences.shared.gifHotKeyModifiers
-        )
-        historyHotKey.register(
-            keyCode: AppPreferences.shared.historyHotKeyCode,
-            modifiers: AppPreferences.shared.historyHotKeyModifiers
-        )
+        DiagnosticLogger.shared.log("lifecycle", "application_ready")
+        hotKeyRegistry.install(name: "capture", id: 1) { [weak self] in self?.standardCapture() }
+        hotKeyRegistry.install(name: "pin", id: 2) { [weak self] in self?.pinRegion() }
+        hotKeyRegistry.install(name: "text", id: 3) { [weak self] in self?.extractText() }
+        hotKeyRegistry.install(name: "gif", id: 4) { [weak self] in self?.recordGIF() }
+        hotKeyRegistry.install(name: "history", id: 5) { [weak self] in self?.showClipboardHistory() }
+        if case let .failure(error) = hotKeyRegistry.apply(AppPreferences.shared.allHotKeyBindings) {
+            DiagnosticLogger.shared.log("hotkey", "initial_registration_failed", fields: ["reason": error.localizedDescription])
+        }
         if AppPreferences.shared.clipboardHistoryEnabled && AppPreferences.shared.clipboardHistoryConsentCompleted {
             historyService.start()
         }
         coordinator.onGIFRecordingStateChange = { [weak self] recording in
-            self?.gifMenuItem?.title = recording ? "停止 GIF 录制" : "录制 GIF"
+            self?.statusItem.button?.image = NSImage(
+                systemSymbolName: recording ? "record.circle.fill" : "viewfinder",
+                accessibilityDescription: recording ? "GIF 正在录制" : "横截"
+            )
         }
         if !PermissionManager.canCaptureScreen {
             showPermissionIntroduction()
@@ -68,37 +63,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         statusItem.button?.image = NSImage(systemSymbolName: "viewfinder", accessibilityDescription: "横截")
         statusItem.button?.toolTip = "横截"
-        let menu = NSMenu()
-        menu.addItem(item("普通截图", #selector(standardCapture), "A", [.option, .shift]))
-        menu.addItem(item("上下长截图", #selector(verticalCapture)))
-        menu.addItem(item("左右长截图", #selector(horizontalCapture)))
-        menu.addItem(item("钉住区域", #selector(pinRegion), "p", [.option, .shift]))
-        menu.addItem(item("提取文字", #selector(extractText), "o", [.option, .shift]))
-        let gif = item("录制 GIF", #selector(recordGIF), "g", [.option, .shift])
-        gifMenuItem = gif
-        menu.addItem(gif)
-        menu.addItem(item("剪贴板历史", #selector(showClipboardHistory), "v", [.control, .shift]))
-        menu.addItem(.separator())
-        menu.addItem(item("权限检查…", #selector(checkPermissions)))
-        menu.addItem(item("设置…", #selector(openPreferences)))
-        menu.addItem(.separator())
-        menu.addItem(item("退出横截", #selector(quit), "q", [.command]))
-        statusItem.menu = menu
+        statusItem.button?.target = self
+        statusItem.button?.action = #selector(toggleMenuPanel)
     }
 
-    private func item(_ title: String, _ action: Selector, _ key: String = "", _ modifiers: NSEvent.ModifierFlags = []) -> NSMenuItem {
-        let item = NSMenuItem(title: title, action: action, keyEquivalent: key)
-        item.keyEquivalentModifierMask = modifiers
-        item.target = self
-        return item
+    @objc private func toggleMenuPanel() {
+        guard let button = statusItem.button else { return }
+        menuPanel.toggle(relativeTo: button)
     }
 
-    @objc private func standardCapture() { coordinator.begin(mode: .standard) }
-    @objc private func verticalCapture() { coordinator.begin(mode: .vertical) }
-    @objc private func horizontalCapture() { coordinator.begin(mode: .horizontal) }
-    @objc private func pinRegion() { coordinator.beginPin() }
-    @objc private func extractText() { coordinator.beginTextExtraction() }
-    @objc private func recordGIF() { coordinator.beginGIFRecording() }
+    @objc private func standardCapture() { DiagnosticLogger.shared.log("capture", "standard_started"); coordinator.begin(mode: .standard) }
+    @objc private func verticalCapture() { DiagnosticLogger.shared.log("capture", "vertical_started"); coordinator.begin(mode: .vertical) }
+    @objc private func horizontalCapture() { DiagnosticLogger.shared.log("capture", "horizontal_started"); coordinator.begin(mode: .horizontal) }
+    @objc private func pinRegion() { DiagnosticLogger.shared.log("capture", "pin_started"); coordinator.beginPin() }
+    @objc private func extractText() { DiagnosticLogger.shared.log("capture", "ocr_started"); coordinator.beginTextExtraction() }
+    @objc private func recordGIF() { DiagnosticLogger.shared.log("capture", "gif_toggled"); coordinator.beginGIFRecording() }
     @objc private func showClipboardHistory() { openClipboardHistory() }
     @objc private func quit() { NSApplication.shared.terminate(nil) }
 
@@ -107,13 +86,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func openPreferences() {
-        let controller = PreferencesWindowController(onChange: { [weak self] in
+        let controller = PreferencesWindowController(onApplyHotKeys: { [weak self] bindings in
+            guard let self else { return .success(()) }
+            return self.hotKeyRegistry.apply(bindings)
+        }, onChange: { [weak self] in
             guard let self else { return }
-            self.captureHotKey.register(keyCode: AppPreferences.shared.hotKeyCode, modifiers: AppPreferences.shared.hotKeyModifiers)
-            self.pinHotKey.register(keyCode: AppPreferences.shared.pinHotKeyCode, modifiers: AppPreferences.shared.pinHotKeyModifiers)
-            self.textHotKey.register(keyCode: AppPreferences.shared.textHotKeyCode, modifiers: AppPreferences.shared.textHotKeyModifiers)
-            self.gifHotKey.register(keyCode: AppPreferences.shared.gifHotKeyCode, modifiers: AppPreferences.shared.gifHotKeyModifiers)
-            self.historyHotKey.register(keyCode: AppPreferences.shared.historyHotKeyCode, modifiers: AppPreferences.shared.historyHotKeyModifiers)
             if AppPreferences.shared.clipboardHistoryEnabled { self.historyService.start() }
             else { self.historyService.stop() }
         }, onClearHistory: { [weak self] in self?.historyService.clearAll() })
@@ -126,6 +103,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         coordinator.cancelGIFRecording()
         historyService.stop()
         GIFTemporaryFiles.cleanupStaleFiles()
+        DiagnosticLogger.shared.finishSession()
     }
 
     private func openClipboardHistory() {

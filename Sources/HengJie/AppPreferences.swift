@@ -18,6 +18,7 @@ final class AppPreferences {
         static let gifHotKeyModifiers = "gifHotKeyModifiers"
         static let historyHotKeyCode = "historyHotKeyCode"
         static let historyHotKeyModifiers = "historyHotKeyModifiers"
+        static let disabledHotKeys = "disabledHotKeys"
         static let clipboardHistoryEnabled = "clipboardHistoryEnabled"
         static let clipboardHistoryConsentCompleted = "clipboardHistoryConsentCompleted"
         static let gifFramesPerSecond = "gifFramesPerSecond"
@@ -93,6 +94,41 @@ final class AppPreferences {
     var historyHotKeyModifiers: UInt32 {
         get { UInt32((UserDefaults.standard.object(forKey: Key.historyHotKeyModifiers) as? Int) ?? (controlKey | shiftKey)) }
         set { UserDefaults.standard.set(Int(newValue), forKey: Key.historyHotKeyModifiers) }
+    }
+
+    var captureBinding: HotKeyBinding {
+        get { .init(keyCode: hotKeyCode, modifiers: hotKeyModifiers) }
+        set { hotKeyCode = newValue.keyCode; hotKeyModifiers = newValue.modifiers }
+    }
+
+    var pinBinding: HotKeyBinding {
+        get { .init(keyCode: pinHotKeyCode, modifiers: pinHotKeyModifiers) }
+        set { pinHotKeyCode = newValue.keyCode; pinHotKeyModifiers = newValue.modifiers }
+    }
+
+    var textBinding: HotKeyBinding {
+        get { .init(keyCode: textHotKeyCode, modifiers: textHotKeyModifiers) }
+        set { textHotKeyCode = newValue.keyCode; textHotKeyModifiers = newValue.modifiers }
+    }
+
+    var gifBinding: HotKeyBinding {
+        get { .init(keyCode: gifHotKeyCode, modifiers: gifHotKeyModifiers) }
+        set { gifHotKeyCode = newValue.keyCode; gifHotKeyModifiers = newValue.modifiers }
+    }
+
+    var historyBinding: HotKeyBinding {
+        get { .init(keyCode: historyHotKeyCode, modifiers: historyHotKeyModifiers) }
+        set { historyHotKeyCode = newValue.keyCode; historyHotKeyModifiers = newValue.modifiers }
+    }
+
+    var disabledHotKeys: Set<String> {
+        get { Set(UserDefaults.standard.stringArray(forKey: Key.disabledHotKeys) ?? []) }
+        set { UserDefaults.standard.set(Array(newValue).sorted(), forKey: Key.disabledHotKeys) }
+    }
+
+    var allHotKeyBindings: [String: HotKeyBinding] {
+        let values = ["capture": captureBinding, "pin": pinBinding, "text": textBinding, "gif": gifBinding, "history": historyBinding]
+        return values.filter { !disabledHotKeys.contains($0.key) }
     }
 
     var clipboardHistoryEnabled: Bool {

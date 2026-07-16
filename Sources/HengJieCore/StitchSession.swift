@@ -3,7 +3,7 @@ import Foundation
 import ImageIO
 import UniformTypeIdentifiers
 
-public final class StitchSession {
+public final class StitchSession: @unchecked Sendable {
     public let axis: StitchAxis
     public let limits: StitchLimits
     public private(set) var frameCount = 0
@@ -14,6 +14,8 @@ public final class StitchSession {
     private var lastFrame: CGImage?
     private var segments: [(url: URL, size: CGSize)] = []
     private let directory: URL
+    private var consecutiveFailures = 0
+    private let lock = NSLock()
 
     public init(axis: StitchAxis, limits: StitchLimits = .init(), estimator: OverlapEstimator = .init()) throws {
         self.axis = axis
@@ -28,6 +30,8 @@ public final class StitchSession {
 
     @discardableResult
     public func append(_ frame: CGImage) throws -> OverlapMatch? {
+        lock.lock()
+        defer { lock.unlock() }
         guard let previous = lastFrame else {
             try store(frame, prepend: false)
             lastFrame = frame
@@ -38,9 +42,60 @@ public final class StitchSession {
         guard previous.width == frame.width, previous.height == frame.height else {
             throw StitchError.incompatibleFrameSize
         }
-        guard let match = estimator.estimate(previous: previous, next: frame, axis: axis) else {
-            throw StitchError.noReliableOverlap(confidence: 0)
+        let estimate = estimator.analyze(previous: previous, next: frame, axis: axis)
+        let match: OverlapMatch
+        switch estimate {
+        case let .match(value): match = value
+        case .unchanged: return nil
+        case let .ambiguous(confidence, _), let .insufficient(confidence, _):
+            throw StitchError.noReliableOverlap(confidence: confidence)
         }
+        return try append(frame, using: match)
+    }
+
+    public func appendAnalyzed(_ frame: CGImage) throws -> StitchAppendResult {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let previous = lastFrame else {
+            try store(frame, prepend: false)
+            lastFrame = frame
+            frameCount = 1
+            pixelSize = CGSize(width: frame.width, height: frame.height)
+            return .initial
+        }
+        guard previous.width == frame.width, previous.height == frame.height else {
+            return .paused(.viewportChanged)
+        }
+
+        let change = FrameChangeDetector.changeRatio(previous, frame)
+        if change < 0.002 { return .unchanged }
+        switch estimator.analyze(previous: previous, next: frame, axis: axis) {
+        case .unchanged:
+            return .unchanged
+        case let .match(match):
+            if let direction, direction != match.direction { return .paused(.directionReversed) }
+            let accepted = try append(frame, using: match)
+            consecutiveFailures = 0
+            return .accepted(accepted)
+        case .ambiguous:
+            consecutiveFailures += 1
+            return consecutiveFailures < 3 ? .waitingForMoreFrames : .paused(.ambiguousPattern)
+        case let .insufficient(_, coverage):
+            consecutiveFailures += 1
+            if change > 0.45 && coverage < 0.3 {
+                return consecutiveFailures < 4 ? .waitingForMoreFrames : .paused(.animationInterference)
+            }
+            return consecutiveFailures < 3 ? .waitingForMoreFrames : .paused(.insufficientOverlap)
+        }
+    }
+
+    public func retryCurrentSegment() {
+        lock.lock()
+        defer { lock.unlock() }
+        consecutiveFailures = 0
+    }
+
+    private func append(_ frame: CGImage, using match: OverlapMatch) throws -> OverlapMatch {
         if let direction, direction != match.direction { throw StitchError.directionReversed }
         direction = match.direction
 
@@ -74,6 +129,8 @@ public final class StitchSession {
     }
 
     public func render() throws -> CGImage {
+        lock.lock()
+        defer { lock.unlock() }
         let width = Int(pixelSize.width)
         let height = Int(pixelSize.height)
         guard width > 0, height > 0,

@@ -1,10 +1,14 @@
 import AppKit
 
 @MainActor
-final class ClipboardHistoryWindowController: NSWindowController, NSWindowDelegate, NSTableViewDataSource, NSTableViewDelegate {
+final class ClipboardHistoryWindowController: NSWindowController, NSWindowDelegate, NSTableViewDataSource, NSTableViewDelegate, NSSearchFieldDelegate {
     private let service: ClipboardHistoryService
     private let tableView = ClipboardHistoryTableView()
     private let statusLabel = NSTextField(wrappingLabelWithString: "")
+    private let searchField = NSSearchField()
+    private let filterControl = NSSegmentedControl(labels: ClipboardHistoryFilter.allCases.map(\.title), trackingMode: .selectOne, target: nil, action: nil)
+    private let timePopup = NSPopUpButton()
+    private var displayedItems: [ClipboardHistoryItem] = []
 
     init(service: ClipboardHistoryService) {
         self.service = service
@@ -32,7 +36,7 @@ final class ClipboardHistoryWindowController: NSWindowController, NSWindowDelega
         positionNearMouse()
         window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
-        if !service.items.isEmpty {
+        if !displayedItems.isEmpty {
             tableView.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
             tableView.scrollRowToVisible(0)
         }
@@ -43,6 +47,17 @@ final class ClipboardHistoryWindowController: NSWindowController, NSWindowDelega
         let header = NSTextField(labelWithString: "最近复制的内容")
         header.font = .systemFont(ofSize: 15, weight: .semibold)
         header.translatesAutoresizingMaskIntoConstraints = false
+        searchField.placeholderString = "搜索文字、链接或富文本"
+        searchField.delegate = self
+        searchField.translatesAutoresizingMaskIntoConstraints = false
+        filterControl.selectedSegment = 0
+        filterControl.target = self
+        filterControl.action = #selector(filterChanged)
+        filterControl.translatesAutoresizingMaskIntoConstraints = false
+        timePopup.addItems(withTitles: ClipboardHistoryTimeFilter.allCases.map(\.title))
+        timePopup.target = self
+        timePopup.action = #selector(filterChanged)
+        timePopup.translatesAutoresizingMaskIntoConstraints = false
 
         tableView.headerView = nil
         tableView.rowHeight = 72
@@ -74,15 +89,26 @@ final class ClipboardHistoryWindowController: NSWindowController, NSWindowDelega
         clearButton.translatesAutoresizingMaskIntoConstraints = false
 
         content.addSubview(header)
+        content.addSubview(searchField)
+        content.addSubview(filterControl)
+        content.addSubview(timePopup)
         content.addSubview(scrollView)
         content.addSubview(statusLabel)
         content.addSubview(clearButton)
         NSLayoutConstraint.activate([
             header.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 18),
             header.topAnchor.constraint(equalTo: content.topAnchor, constant: 16),
+            searchField.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 14),
+            searchField.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -14),
+            searchField.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 10),
+            filterControl.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 14),
+            filterControl.trailingAnchor.constraint(lessThanOrEqualTo: timePopup.leadingAnchor, constant: -8),
+            filterControl.topAnchor.constraint(equalTo: searchField.bottomAnchor, constant: 8),
+            timePopup.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -14),
+            timePopup.centerYAnchor.constraint(equalTo: filterControl.centerYAnchor),
             scrollView.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 14),
             scrollView.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -14),
-            scrollView.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 10),
+            scrollView.topAnchor.constraint(equalTo: filterControl.bottomAnchor, constant: 8),
             scrollView.bottomAnchor.constraint(equalTo: statusLabel.topAnchor, constant: -8),
             statusLabel.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 18),
             statusLabel.trailingAnchor.constraint(lessThanOrEqualTo: clearButton.leadingAnchor, constant: -10),
@@ -93,12 +119,16 @@ final class ClipboardHistoryWindowController: NSWindowController, NSWindowDelega
     }
 
     private func reload() {
+        let filter = ClipboardHistoryFilter(rawValue: filterControl.selectedSegment) ?? .all
+        let timeFilter = ClipboardHistoryTimeFilter(rawValue: timePopup.indexOfSelectedItem) ?? .all
+        displayedItems = service.filteredItems(query: searchField.stringValue, filter: filter, timeFilter: timeFilter)
         tableView.reloadData()
-        if service.items.isEmpty {
-            statusLabel.stringValue = service.statusMessage ?? "暂无记录。启用后只记录后续发生的剪贴板变化。"
+        if displayedItems.isEmpty {
+            statusLabel.stringValue = service.statusMessage ?? (searchField.stringValue.isEmpty ? "暂无记录。启用后只记录后续发生的剪贴板变化。" : "没有匹配的历史记录。")
         } else {
             let size = ByteCountFormatter.string(fromByteCount: service.items.reduce(0) { $0 + $1.byteCount }, countStyle: .file)
-            statusLabel.stringValue = service.statusMessage ?? "\(service.items.count)/100 条 · \(size)"
+            let visible = displayedItems.count == service.items.count ? "" : " · 显示 \(displayedItems.count) 条"
+            statusLabel.stringValue = service.statusMessage ?? "\(service.items.count)/100 条 · \(size)\(visible)"
         }
     }
 
@@ -116,15 +146,19 @@ final class ClipboardHistoryWindowController: NSWindowController, NSWindowDelega
         window.setFrame(frame, display: false)
     }
 
-    func numberOfRows(in tableView: NSTableView) -> Int { service.items.count }
+    func numberOfRows(in tableView: NSTableView) -> Int { displayedItems.count }
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
-        guard service.items.indices.contains(row) else { return nil }
+        guard displayedItems.indices.contains(row) else { return nil }
         let identifier = NSUserInterfaceItemIdentifier("ClipboardHistoryCell")
         let cell = (tableView.makeView(withIdentifier: identifier, owner: self) as? ClipboardHistoryCellView)
             ?? ClipboardHistoryCellView(identifier: identifier)
-        let item = service.items[row]
-        cell.configure(item: item, image: service.previewImage(for: item), row: row, target: self)
+        let item = displayedItems[row]
+        cell.configure(item: item, image: nil, row: row, target: self)
+        service.loadPreview(for: item) { [weak self, weak cell] image in
+            guard let self, self.displayedItems.indices.contains(row), self.displayedItems[row].id == item.id else { return }
+            cell?.updatePreview(image, fallbackSymbol: item.kind.symbolName, title: item.kind.title)
+        }
         return cell
     }
 
@@ -132,19 +166,19 @@ final class ClipboardHistoryWindowController: NSWindowController, NSWindowDelega
 
     private func copyCurrentSelection() {
         let row = tableView.selectedRow
-        guard service.items.indices.contains(row) else { return }
-        service.copyToPasteboard(service.items[row])
+        guard displayedItems.indices.contains(row) else { return }
+        service.copyToPasteboard(displayedItems[row])
         window?.orderOut(nil)
     }
 
     @objc func togglePin(_ sender: NSButton) {
-        guard service.items.indices.contains(sender.tag) else { return }
-        service.togglePinned(service.items[sender.tag].id)
+        guard displayedItems.indices.contains(sender.tag) else { return }
+        service.togglePinned(displayedItems[sender.tag].id)
     }
 
     @objc func deleteItem(_ sender: NSButton) {
-        guard service.items.indices.contains(sender.tag) else { return }
-        service.delete(service.items[sender.tag].id)
+        guard displayedItems.indices.contains(sender.tag) else { return }
+        service.delete(displayedItems[sender.tag].id)
     }
 
     @objc private func clearUnpinned() {
@@ -156,6 +190,10 @@ final class ClipboardHistoryWindowController: NSWindowController, NSWindowDelega
         alert.addButton(withTitle: "取消")
         if alert.runModal() == .alertFirstButtonReturn { service.clearUnpinned() }
     }
+
+    @objc private func filterChanged() { reload() }
+
+    func controlTextDidChange(_ obj: Notification) { reload() }
 }
 
 private final class ClipboardHistoryTableView: NSTableView {
@@ -215,6 +253,10 @@ private final class ClipboardHistoryCellView: NSTableCellView {
         deleteButton.target = target
         deleteButton.action = #selector(ClipboardHistoryWindowController.deleteItem(_:))
         needsLayout = true
+    }
+
+    func updatePreview(_ image: NSImage?, fallbackSymbol: String, title: String) {
+        preview.image = image ?? NSImage(systemSymbolName: fallbackSymbol, accessibilityDescription: title)
     }
 
     override func layout() {

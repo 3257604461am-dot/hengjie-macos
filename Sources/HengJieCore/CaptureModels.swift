@@ -47,12 +47,58 @@ public struct OverlapMatch: Equatable, Sendable {
     public let overlap: Int
     public let confidence: Double
     public let direction: StitchDirection
+    public let orthogonalOffset: Int
+    public let ambiguity: Double
+    public let effectiveCoverage: Double
 
-    public init(overlap: Int, confidence: Double, direction: StitchDirection) {
+    public init(
+        overlap: Int,
+        confidence: Double,
+        direction: StitchDirection,
+        orthogonalOffset: Int = 0,
+        ambiguity: Double = 1,
+        effectiveCoverage: Double = 1
+    ) {
         self.overlap = overlap
         self.confidence = confidence
         self.direction = direction
+        self.orthogonalOffset = orthogonalOffset
+        self.ambiguity = ambiguity
+        self.effectiveCoverage = effectiveCoverage
     }
+}
+
+public enum StitchPauseReason: String, Equatable, Sendable {
+    case animationInterference
+    case ambiguousPattern
+    case insufficientOverlap
+    case directionReversed
+    case viewportChanged
+
+    public var message: String {
+        switch self {
+        case .animationInterference: "画面仍在变化，请稍等稳定后重试。"
+        case .ambiguousPattern: "检测到重复纹理，无法安全确定拼接位置。"
+        case .insufficientOverlap: "当前画面与上一段重叠不足，请回到上一位置后重试。"
+        case .directionReversed: "检测到明显反向滚动，请回到原方向后继续。"
+        case .viewportChanged: "截图区域或窗口尺寸发生变化，请恢复后重试。"
+        }
+    }
+}
+
+public enum StitchAppendResult: Equatable, Sendable {
+    case initial
+    case accepted(OverlapMatch)
+    case unchanged
+    case waitingForMoreFrames
+    case paused(StitchPauseReason)
+}
+
+public enum OverlapEstimate: Equatable, Sendable {
+    case match(OverlapMatch)
+    case unchanged
+    case ambiguous(confidence: Double, coverage: Double)
+    case insufficient(confidence: Double, coverage: Double)
 }
 
 public enum StitchError: LocalizedError, Equatable {

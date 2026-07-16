@@ -6,18 +6,20 @@ final class ScrollCaptureController: NSWindowController {
     private let captureRect: CGRect
     private let axis: StitchAxis
     private let captureService: ScreenCaptureService
+    private let frameSource: ScrollFrameSource
     private let completion: (Result<CGImage, Error>) -> Void
     private let session: StitchSession
     private var driver: ScrollDriver
     private var captureTask: Task<Void, Never>?
-    private var lastFrame: CGImage?
     private var paused = false
     private var completed = false
+    private var lastAutoScrollAt = Date.distantPast
 
     private let statusLabel = NSTextField(labelWithString: "准备采集…")
     private let progressLabel = NSTextField(labelWithString: "0 帧")
     private let driverButton = NSButton()
     private let pauseButton = NSButton()
+    private let retryButton = NSButton()
 
     init(
         rect: CGRect,
@@ -28,6 +30,7 @@ final class ScrollCaptureController: NSWindowController {
         captureRect = rect
         self.axis = axis
         self.captureService = captureService
+        frameSource = ScrollFrameSource(rect: rect, snapshotService: captureService)
         self.completion = completion
         session = try StitchSession(axis: axis)
         driver = .default
@@ -50,6 +53,7 @@ final class ScrollCaptureController: NSWindowController {
         window.setFrameOrigin(CGPoint(x: screenFrame.midX - window.frame.width / 2, y: screenFrame.maxY - window.frame.height - 24))
         showWindow(nil)
         window.orderFrontRegardless()
+        DiagnosticLogger.shared.log("stitch", "session_started", fields: ["axis": axis == .horizontal ? "horizontal" : "vertical"])
         captureTask = Task { [weak self] in await self?.captureLoop() }
     }
 
@@ -66,6 +70,11 @@ final class ScrollCaptureController: NSWindowController {
         pauseButton.target = self
         pauseButton.action = #selector(togglePause)
         pauseButton.bezelStyle = .rounded
+        retryButton.title = "重试当前段"
+        retryButton.target = self
+        retryButton.action = #selector(retryCurrentSegment)
+        retryButton.bezelStyle = .rounded
+        retryButton.isHidden = true
         let finish = NSButton(title: "完成", target: self, action: #selector(finishCapture))
         finish.bezelStyle = .rounded
         finish.keyEquivalent = "\r"
@@ -75,7 +84,7 @@ final class ScrollCaptureController: NSWindowController {
         let labels = NSStackView(views: [statusLabel, progressLabel])
         labels.orientation = .vertical
         labels.alignment = .leading
-        let controls = NSStackView(views: [driverButton, pauseButton, finish, cancel])
+        let controls = NSStackView(views: [driverButton, pauseButton, retryButton, finish, cancel])
         controls.spacing = 8
         let root = NSStackView(views: [labels, controls])
         root.orientation = .vertical
@@ -93,49 +102,52 @@ final class ScrollCaptureController: NSWindowController {
     }
 
     private func captureLoop() async {
-        try? await Task.sleep(for: .milliseconds(300))
-        while !Task.isCancelled, !completed {
-            if paused {
-                try? await Task.sleep(for: .milliseconds(200))
-                continue
-            }
-            do {
-                let frame = try await captureService.capture(globalRect: captureRect)
-                if let lastFrame {
-                    let change = FrameChangeDetector.changeRatio(lastFrame, frame)
-                    if change > 0.012 {
-                        do {
-                            let match = try session.append(frame)
-                            self.lastFrame = frame
-                            updateProgress(confidence: match?.confidence)
-                        } catch StitchError.directionReversed {
-                            paused = true
-                            pauseButton.title = "继续"
-                            updateStatus("检测到反向滚动，已暂停；请回到原方向后继续")
-                        } catch StitchError.noReliableOverlap {
-                            paused = true
-                            pauseButton.title = "重试"
-                            updateStatus("当前画面重叠不足，已暂停以防止错误拼接")
-                        } catch StitchError.limitReached {
-                            updateStatus("已达到长图尺寸上限，正在完成")
-                            finishCapture()
-                            return
+        do {
+            let frames = try await frameSource.start()
+            for await frame in frames {
+                guard !Task.isCancelled, !completed else { break }
+                if !paused {
+                    do {
+                        let stitchSession = session
+                        let result = try await Task.detached(priority: .userInitiated) {
+                            try stitchSession.appendAnalyzed(frame)
+                        }.value
+                        switch result {
+                        case .initial:
+                            updateProgress(confidence: nil)
+                        case let .accepted(match):
+                            updateProgress(confidence: match.confidence)
+                            DiagnosticLogger.shared.log("stitch", "frame_accepted", fields: [
+                                "confidence": String(format: "%.3f", match.confidence),
+                                "coverage": String(format: "%.3f", match.effectiveCoverage),
+                                "ambiguity": String(format: "%.3f", match.ambiguity),
+                                "overlap": "\(match.overlap)"
+                            ])
+                        case .unchanged:
+                            break
+                        case .waitingForMoreFrames:
+                            updateStatus("正在寻找可靠的中间帧…")
+                        case let .paused(reason):
+                            pauseFor(reason)
                         }
+                    } catch StitchError.limitReached {
+                        updateStatus("已达到长图尺寸上限，正在完成")
+                        finishCapture()
+                        return
                     }
-                } else {
-                    _ = try session.append(frame)
-                    lastFrame = frame
-                    updateProgress(confidence: nil)
                 }
-                if driver == .automatic, PermissionManager.hasAccessibility {
+                if driver == .automatic, PermissionManager.hasAccessibility,
+                   Date().timeIntervalSince(lastAutoScrollAt) >= 0.62 {
+                    lastAutoScrollAt = Date()
                     if !postScrollEvent() { updateStatus("鼠标已离开截图区域，自动滚动暂时停止") }
                 }
-            } catch {
-                paused = true
-                updateStatus(error.localizedDescription)
             }
-            try? await Task.sleep(for: .milliseconds(driver == .automatic ? 620 : 260))
+        } catch {
+            paused = true
+            retryButton.isHidden = false
+            updateStatus(error.localizedDescription)
         }
+        await frameSource.stop()
     }
 
     @discardableResult
@@ -168,20 +180,36 @@ final class ScrollCaptureController: NSWindowController {
     @objc private func togglePause() {
         paused.toggle()
         pauseButton.title = paused ? "继续" : "暂停"
+        retryButton.isHidden = !paused
+        if !paused { session.retryCurrentSegment() }
         updateStatus(paused ? "已暂停" : (driver == .manual ? "请继续手动滚动" : "正在自动滚动"))
+    }
+
+    @objc private func retryCurrentSegment() {
+        session.retryCurrentSegment()
+        paused = false
+        retryButton.isHidden = true
+        pauseButton.title = "暂停"
+        updateStatus("请回到上一位置，然后沿原方向缓慢滚动")
     }
 
     @objc private func finishCapture() {
         guard !completed else { return }
         completed = true
         captureTask?.cancel()
-        do {
-            let image = try session.render()
-            close()
-            completion(.success(image))
-        } catch {
-            close()
-            completion(.failure(error))
+        Task { [weak self] in
+            guard let self else { return }
+            await frameSource.stop()
+            do {
+                let stitchSession = session
+                let image = try await Task.detached(priority: .userInitiated) { try stitchSession.render() }.value
+                DiagnosticLogger.shared.log("stitch", "session_finished", fields: ["frames": "\(session.frameCount)", "pixels": "\(Int(session.pixelSize.width))x\(Int(session.pixelSize.height))"])
+                close()
+                completion(.success(image))
+            } catch {
+                close()
+                completion(.failure(error))
+            }
         }
     }
 
@@ -189,11 +217,20 @@ final class ScrollCaptureController: NSWindowController {
         guard !completed else { return }
         completed = true
         captureTask?.cancel()
+        Task { await frameSource.stop() }
         close()
+        DiagnosticLogger.shared.log("stitch", "session_cancelled", fields: ["frames": "\(session.frameCount)"])
         completion(.failure(CancellationError()))
     }
 
     private func updateStatus(_ text: String) { statusLabel.stringValue = text }
+    private func pauseFor(_ reason: StitchPauseReason) {
+        paused = true
+        retryButton.isHidden = false
+        pauseButton.title = "继续手动滚动"
+        updateStatus(reason.message)
+        DiagnosticLogger.shared.log("stitch", "session_paused", fields: ["reason": reason.rawValue])
+    }
     private func updateProgress(confidence: Double?) {
         let axisLength = axis == .horizontal ? Int(session.pixelSize.width) : Int(session.pixelSize.height)
         let confidenceText = confidence.map { " · 匹配 \(Int($0 * 100))%" } ?? ""

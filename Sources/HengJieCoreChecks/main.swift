@@ -35,6 +35,27 @@ func makePattern(width: Int, height: Int, seed: Int = 3) -> CGImage {
     )!
 }
 
+func makeRepeatedGrid(width: Int, height: Int, cell: Int = 16) -> CGImage {
+    var pixels = [UInt8](repeating: 255, count: width * height * 4)
+    for y in 0..<height {
+        for x in 0..<width {
+            let offset = (y * width + x) * 4
+            let line = x % cell == 0 || y % cell == 0
+            let value: UInt8 = line ? 70 : 238
+            pixels[offset] = value
+            pixels[offset + 1] = value
+            pixels[offset + 2] = value
+            pixels[offset + 3] = 255
+        }
+    }
+    let provider = CGDataProvider(data: Data(pixels) as CFData)!
+    return CGImage(
+        width: width, height: height, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: width * 4,
+        space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
+        provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent
+    )!
+}
+
 func runChecks() throws {
     do {
         let source = makePattern(width: 920, height: 180)
@@ -98,6 +119,29 @@ func runChecks() throws {
         let unrelated = makePattern(width: 400, height: 180, seed: 97)
         let unrelatedMatch = OverlapEstimator().estimate(previous: first, next: unrelated, axis: .horizontal)
         try expect(unrelatedMatch == nil, "无关帧不应被拼接")
+    }
+    do {
+        let source = makePattern(width: 920, height: 220, seed: 77)
+        let first = source.cropping(to: CGRect(x: 0, y: 4, width: 420, height: 180))!
+        let second = source.cropping(to: CGRect(x: 210, y: 6, width: 420, height: 180))!
+        let match = OverlapEstimator().estimate(previous: first, next: second, axis: .horizontal)
+        try expect(match != nil, "轻微正交偏移不应导致拼接失败")
+        try expect(abs(match?.orthogonalOffset ?? 99) <= 4, "正交偏移估算超出容差")
+    }
+    do {
+        let grid = makeRepeatedGrid(width: 640, height: 180)
+        let first = grid.cropping(to: CGRect(x: 0, y: 0, width: 360, height: 180))!
+        let second = grid.cropping(to: CGRect(x: 64, y: 0, width: 360, height: 180))!
+        let analysis = OverlapEstimator().analyze(previous: first, next: second, axis: .horizontal)
+        if case .match = analysis { throw CheckFailure.failed("纯重复网格存在歧义时不应强行拼接") }
+    }
+    do {
+        let session = try StitchSession(axis: .horizontal)
+        let frame = makePattern(width: 320, height: 160, seed: 8)
+        let initial = try session.appendAnalyzed(frame)
+        let unchanged = try session.appendAnalyzed(frame)
+        try expect(initial == .initial, "首帧状态错误")
+        try expect(unchanged == .unchanged, "静止帧应被忽略")
     }
     do {
         let source = makePattern(width: 900, height: 180, seed: 41)
@@ -166,6 +210,9 @@ func runChecks() throws {
             hasEvictableItem: false
         ), "全固定且满 100 条时不应继续接收")
         try expect(ClipboardHistoryRules.normalizedPreview("  第一行\n\n第二行  ") == "第一行 第二行", "历史摘要规范化错误")
+        try expect(ClipboardHistoryRules.matches(searchText: "Hello 横截 テスト", query: "hello 横截"), "中英日搜索规范化错误")
+        try expect(ClipboardHistoryRules.matches(searchText: "ＡＢＣ １２３", query: "abc 123"), "全角半角搜索错误")
+        try expect(!ClipboardHistoryRules.matches(searchText: "横截截图", query: "横截 翻译"), "多关键词搜索必须全部命中")
     }
 }
 
