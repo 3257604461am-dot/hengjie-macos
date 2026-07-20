@@ -131,26 +131,33 @@ private actor ScreenshotHistoryStore {
         return sorted
     }
 
-    func create(item: ScreenshotHistoryItem, imageData: Data, thumbnailData: Data, project: ScreenshotProject) throws -> Int64 {
+    func create(item: ScreenshotHistoryItem, imageData: Data, thumbnailData: Data, project: ScreenshotProject) throws -> ScreenshotHistoryItem {
         try FileManager.default.createDirectory(at: rootURL, withIntermediateDirectories: true)
         let directory = directory(for: item.id)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        try imageData.write(to: directory.appendingPathComponent("source.png"), options: .atomic)
-        try thumbnailData.write(to: directory.appendingPathComponent("thumbnail.png"), options: .atomic)
-        try encoder.encode(project).write(to: directory.appendingPathComponent("project.json"), options: .atomic)
-        try encoder.encode(item).write(to: directory.appendingPathComponent("item.json"), options: .atomic)
-        return byteCount(in: directory)
+        do {
+            let projectData = try encoder.encode(project)
+            try imageData.write(to: directory.appendingPathComponent("source.png"), options: .atomic)
+            try thumbnailData.write(to: directory.appendingPathComponent("thumbnail.png"), options: .atomic)
+            try projectData.write(to: directory.appendingPathComponent("project.json"), options: .atomic)
+            var storedItem = item
+            storedItem.byteCount = Int64(imageData.count + thumbnailData.count + projectData.count)
+            try encoder.encode(storedItem).write(to: directory.appendingPathComponent("item.json"), options: .atomic)
+            return storedItem
+        } catch {
+            try? FileManager.default.removeItem(at: directory)
+            throw error
+        }
     }
 
-    func saveProject(_ project: ScreenshotProject, item: ScreenshotHistoryItem) throws -> Int64 {
+    func saveProject(_ project: ScreenshotProject, item: ScreenshotHistoryItem) throws -> ScreenshotHistoryItem {
         let directory = directory(for: item.id)
-        try encoder.encode(project).write(to: directory.appendingPathComponent("project.json"), options: .atomic)
-        try encoder.encode(item).write(to: directory.appendingPathComponent("item.json"), options: .atomic)
-        return byteCount(in: directory)
-    }
-
-    func saveMetadata(_ item: ScreenshotHistoryItem) throws {
-        try encoder.encode(item).write(to: directory(for: item.id).appendingPathComponent("item.json"), options: .atomic)
+        let projectData = try encoder.encode(project)
+        try projectData.write(to: directory.appendingPathComponent("project.json"), options: .atomic)
+        var storedItem = item
+        storedItem.byteCount = byteCount(in: directory)
+        try encoder.encode(storedItem).write(to: directory.appendingPathComponent("item.json"), options: .atomic)
+        return storedItem
     }
 
     func saveIndex(_ items: [ScreenshotHistoryItem]) throws {
@@ -158,11 +165,12 @@ private actor ScreenshotHistoryStore {
         try encoder.encode(items).write(to: indexURL, options: .atomic)
     }
 
-    func load(item: ScreenshotHistoryItem) throws -> (Data, ScreenshotProject?, String?) {
+    func load(item: ScreenshotHistoryItem) throws -> (CGImage, ScreenshotProject?, String?) {
         let directory = directory(for: item.id)
         let imageURL = directory.appendingPathComponent("source.png")
         guard FileManager.default.fileExists(atPath: imageURL.path) else { throw ScreenshotHistoryError.missingImage }
-        let image = try Data(contentsOf: imageURL)
+        guard let source = CGImageSourceCreateWithURL(imageURL as CFURL, nil),
+              let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else { throw ScreenshotHistoryError.invalidImage }
         let projectURL = directory.appendingPathComponent("project.json")
         guard let projectData = try? Data(contentsOf: projectURL) else {
             return (image, nil, "标注工程文件已丢失，已仅打开原始底图。")
@@ -173,8 +181,10 @@ private actor ScreenshotHistoryStore {
         return (image, project, nil)
     }
 
-    func thumbnailData(id: UUID) -> Data? {
-        try? Data(contentsOf: directory(for: id).appendingPathComponent("thumbnail.png"))
+    func thumbnailImage(id: UUID) -> CGImage? {
+        let url = directory(for: id).appendingPathComponent("thumbnail.png")
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
+        return CGImageSourceCreateImageAtIndex(source, 0, nil)
     }
 
     func remove(_ ids: [UUID]) {
@@ -224,11 +234,12 @@ final class ScreenshotHistoryService {
 
     private(set) var items: [ScreenshotHistoryItem] = []
     private(set) var statusMessage: String?
-    var onChange: (() -> Void)?
 
     private let store: ScreenshotHistoryStore
     private let thumbnailCache = NSCache<NSUUID, NSImage>()
     private var pendingUpdates: [UUID: Task<Void, Never>] = [:]
+    private var pendingCreations: [UUID: Task<Bool, Never>] = [:]
+    private var observers: [UUID: () -> Void] = [:]
 
     private init(rootURL: URL? = nil) {
         let root = rootURL ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -240,7 +251,7 @@ final class ScreenshotHistoryService {
             guard let self else { return }
             items = await store.loadIndex()
             await pruneAndPersist()
-            onChange?()
+            notifyObservers()
         }
     }
 
@@ -252,41 +263,65 @@ final class ScreenshotHistoryService {
         items.filter { filter.matches($0.kind) }
     }
 
-    func create(image: CGImage, displaySize: CGSize, kind: ScreenshotHistoryKind) async -> UUID? {
+    func observe(_ handler: @escaping () -> Void) -> HistoryObservationToken {
+        let id = UUID()
+        observers[id] = handler
+        return HistoryObservationToken { [weak self] in self?.observers[id] = nil }
+    }
+
+    func trimCaches() { thumbnailCache.removeAllObjects() }
+
+    /// Reserves the history item immediately, then performs lossless encoding and
+    /// persistence in the background so editor presentation is never gated on I/O.
+    func create(image: CGImage, displaySize: CGSize, kind: ScreenshotHistoryKind) -> UUID? {
         guard isEnabled else { return nil }
-        let encoded: (Data, Data)? = await Task.detached(priority: .utility) { () -> (Data, Data)? in
-            guard let imageData = Self.pngData(image), let thumbnailData = Self.thumbnailData(from: imageData) else { return nil }
-            return (imageData, thumbnailData)
-        }.value
-        guard let (imageData, thumbnailData) = encoded else {
-            statusMessage = ScreenshotHistoryError.imageEncodingFailed.localizedDescription
-            onChange?()
-            return nil
-        }
-        guard Int64(imageData.count + thumbnailData.count) < Self.maximumTotalBytes else {
-            statusMessage = ScreenshotHistoryError.itemTooLarge.localizedDescription
-            onChange?()
-            return nil
-        }
         let now = Date()
-        var item = ScreenshotHistoryItem(
+        let item = ScreenshotHistoryItem(
             id: UUID(), kind: kind, state: .draft, createdAt: now, updatedAt: now,
             pixelWidth: image.width, pixelHeight: image.height,
             displayWidth: Double(displaySize.width), displayHeight: Double(displaySize.height), byteCount: 0
         )
-        do {
-            item.byteCount = try await store.create(item: item, imageData: imageData, thumbnailData: thumbnailData, project: ScreenshotProject(displaySize: displaySize))
-            try await store.saveMetadata(item)
-            items.insert(item, at: 0)
-            statusMessage = nil
-            await pruneAndPersist()
-            onChange?()
-            return item.id
-        } catch {
-            statusMessage = "草稿保存失败：\(error.localizedDescription)"
-            onChange?()
-            return nil
+        items.insert(item, at: 0)
+        statusMessage = nil
+        notifyObservers()
+
+        let trace = PerformanceTrace.begin("ScreenshotDraftCreate")
+        let task = Task { [weak self] () -> Bool in
+            guard let self else { return false }
+            let encoded = await Task.detached(priority: .utility) { () -> (Data, Data)? in
+                guard let imageData = Self.pngData(image),
+                      let thumbnailData = Self.thumbnailData(from: imageData) else { return nil }
+                return (imageData, thumbnailData)
+            }.value
+            defer { PerformanceTrace.end("ScreenshotDraftCreate", trace) }
+            guard !Task.isCancelled else { return false }
+            guard let (imageData, thumbnailData) = encoded else {
+                failCreation(id: item.id, error: ScreenshotHistoryError.imageEncodingFailed)
+                return false
+            }
+            guard Int64(imageData.count + thumbnailData.count) < Self.maximumTotalBytes else {
+                failCreation(id: item.id, error: ScreenshotHistoryError.itemTooLarge)
+                return false
+            }
+            do {
+                let stored = try await store.create(
+                    item: item,
+                    imageData: imageData,
+                    thumbnailData: thumbnailData,
+                    project: ScreenshotProject(displaySize: displaySize)
+                )
+                if let index = items.firstIndex(where: { $0.id == item.id }) { items[index] = stored }
+                pendingCreations[item.id] = nil
+                await pruneAndPersist()
+                notifyObservers()
+                return true
+            } catch {
+                failCreation(id: item.id, error: error)
+                return false
+            }
         }
+        pendingCreations[item.id] = task
+        return item.id
     }
 
     func scheduleUpdate(id: UUID, annotations: [AnnotationMarkRecord]) {
@@ -306,10 +341,9 @@ final class ScreenshotHistoryService {
     }
 
     func load(id: UUID) async throws -> LoadedScreenshotProject {
+        if let creation = pendingCreations[id], !(await creation.value) { throw ScreenshotHistoryError.missingImage }
         guard let item = items.first(where: { $0.id == id }) else { throw ScreenshotHistoryError.missingImage }
-        let (data, storedProject, warning) = try await store.load(item: item)
-        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
-              let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else { throw ScreenshotHistoryError.invalidImage }
+        let (image, storedProject, warning) = try await store.load(item: item)
         let fallback = ScreenshotProject(displaySize: CGSize(width: item.displayWidth, height: item.displayHeight))
         return LoadedScreenshotProject(item: item, image: image, project: storedProject ?? fallback, annotationRecoveryWarning: warning)
     }
@@ -318,34 +352,42 @@ final class ScreenshotHistoryService {
         if let cached = thumbnailCache.object(forKey: item.id as NSUUID) { completion(cached); return }
         Task { [weak self] in
             guard let self else { return }
-            let data = await store.thumbnailData(id: item.id)
-            let image = data.flatMap(NSImage.init(data:))
-            if let image { thumbnailCache.setObject(image, forKey: item.id as NSUUID, cost: data?.count ?? 0) }
+            if let creation = pendingCreations[item.id], !(await creation.value) { completion(nil); return }
+            let cgImage = await store.thumbnailImage(id: item.id)
+            let image = cgImage.map { NSImage(cgImage: $0, size: NSSize(width: $0.width, height: $0.height)) }
+            if let image, let cgImage {
+                thumbnailCache.setObject(image, forKey: item.id as NSUUID, cost: cgImage.bytesPerRow * cgImage.height)
+            }
             completion(image)
         }
     }
 
     func delete(_ id: UUID) {
+        pendingCreations[id]?.cancel()
+        pendingCreations[id] = nil
         pendingUpdates[id]?.cancel()
         pendingUpdates[id] = nil
         items.removeAll { $0.id == id }
         thumbnailCache.removeObject(forKey: id as NSUUID)
         Task { await store.remove([id]); await saveIndex() }
-        onChange?()
+        notifyObservers()
     }
 
     func clearAll() {
+        pendingCreations.values.forEach { $0.cancel() }
+        pendingCreations.removeAll()
         pendingUpdates.values.forEach { $0.cancel() }
         pendingUpdates.removeAll()
         items.removeAll()
         thumbnailCache.removeAllObjects()
         statusMessage = nil
         Task { await store.clear(); try? await store.saveIndex([]) }
-        onChange?()
+        notifyObservers()
     }
 
     private func persist(id: UUID, annotations: [AnnotationMarkRecord], completed: Bool) async {
         pendingUpdates[id] = nil
+        if let creation = pendingCreations[id], !(await creation.value) { return }
         guard isEnabled, let index = items.firstIndex(where: { $0.id == id }) else { return }
         let item = items[index]
         let project = ScreenshotProject(displaySize: CGSize(width: item.displayWidth, height: item.displayHeight), annotations: annotations)
@@ -353,19 +395,16 @@ final class ScreenshotHistoryService {
             var metadata = item
             metadata.updatedAt = Date()
             if completed { metadata.state = .completed }
-            let bytes = try await store.saveProject(project, item: metadata)
+            let stored = try await store.saveProject(project, item: metadata)
             guard let refreshed = items.firstIndex(where: { $0.id == id }) else { return }
-            items[refreshed].byteCount = bytes
-            items[refreshed].updatedAt = Date()
-            if completed { items[refreshed].state = .completed }
-            try await store.saveMetadata(items[refreshed])
+            items[refreshed] = stored
             items.sort { $0.updatedAt > $1.updatedAt }
             await pruneAndPersist()
             statusMessage = nil
-            onChange?()
+            notifyObservers()
         } catch {
             statusMessage = "草稿更新失败：\(error.localizedDescription)"
-            onChange?()
+            notifyObservers()
         }
     }
 
@@ -383,6 +422,17 @@ final class ScreenshotHistoryService {
     }
 
     private func saveIndex() async { try? await store.saveIndex(items) }
+
+    private func failCreation(id: UUID, error: Error) {
+        pendingCreations[id] = nil
+        items.removeAll { $0.id == id }
+        statusMessage = "草稿保存失败：\(error.localizedDescription)"
+        notifyObservers()
+    }
+
+    private func notifyObservers() {
+        observers.values.forEach { $0() }
+    }
 
     nonisolated private static func pngData(_ image: CGImage) -> Data? {
         let data = NSMutableData()

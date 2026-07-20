@@ -10,6 +10,7 @@ final class ClipboardHistoryWindowController: NSWindowController, NSWindowDelega
     private let filterControl = NSSegmentedControl(labels: ClipboardHistoryFilter.allCases.map(\.title), trackingMode: .selectOne, target: nil, action: nil)
     private let timePopup = NSPopUpButton()
     private var displayedItems: [ClipboardHistoryItem] = []
+    private var changeObservation: HistoryObservationToken?
 
     init(service: ClipboardHistoryService, onEditImage: @escaping (CGImage) -> Void) {
         self.service = service
@@ -28,12 +29,13 @@ final class ClipboardHistoryWindowController: NSWindowController, NSWindowDelega
         super.init(window: panel)
         panel.delegate = self
         buildUI()
-        service.onChange = { [weak self] in self?.reload() }
+        changeObservation = service.observe { [weak self] in self?.reload() }
     }
 
     required init?(coder: NSCoder) { nil }
 
     func presentNearMouse() {
+        service.setPanelVisible(true)
         reload()
         positionNearMouse()
         window?.makeKeyAndOrderFront(nil)
@@ -70,7 +72,10 @@ final class ClipboardHistoryWindowController: NSWindowController, NSWindowDelega
         tableView.target = self
         tableView.action = #selector(copySelected)
         tableView.onConfirm = { [weak self] in self?.copyCurrentSelection() }
-        tableView.onCancel = { [weak self] in self?.window?.orderOut(nil) }
+        tableView.onCancel = { [weak self] in
+            self?.window?.orderOut(nil)
+            self?.service.setPanelVisible(false)
+        }
         let contextMenu = NSMenu()
         contextMenu.addItem(withTitle: "编辑图片", action: #selector(editSelectedImage), keyEquivalent: "")
         contextMenu.addItem(withTitle: "复制", action: #selector(copySelected), keyEquivalent: "")
@@ -130,8 +135,13 @@ final class ClipboardHistoryWindowController: NSWindowController, NSWindowDelega
     private func reload() {
         let filter = ClipboardHistoryFilter(rawValue: filterControl.selectedSegment) ?? .all
         let timeFilter = ClipboardHistoryTimeFilter(rawValue: timePopup.indexOfSelectedItem) ?? .all
+        let previousIDs = displayedItems.map(\.id)
         displayedItems = service.filteredItems(query: searchField.stringValue, filter: filter, timeFilter: timeFilter)
-        tableView.reloadData()
+        if previousIDs != displayedItems.map(\.id) {
+            tableView.reloadData()
+        } else if !displayedItems.isEmpty {
+            tableView.reloadData(forRowIndexes: IndexSet(integersIn: 0..<displayedItems.count), columnIndexes: IndexSet(integer: 0))
+        }
         if displayedItems.isEmpty {
             statusLabel.stringValue = service.statusMessage ?? (searchField.stringValue.isEmpty ? "暂无记录。启用后只记录后续发生的剪贴板变化。" : "没有匹配的历史记录。")
         } else {
@@ -178,6 +188,7 @@ final class ClipboardHistoryWindowController: NSWindowController, NSWindowDelega
         guard displayedItems.indices.contains(row) else { return }
         service.copyToPasteboard(displayedItems[row])
         window?.orderOut(nil)
+        service.setPanelVisible(false)
     }
 
     @objc func togglePin(_ sender: NSButton) {
@@ -214,6 +225,7 @@ final class ClipboardHistoryWindowController: NSWindowController, NSWindowDelega
             do {
                 let image = try await service.loadImage(item)
                 window?.orderOut(nil)
+                service.setPanelVisible(false)
                 onEditImage(image)
             } catch { NSAlert(error: error).runModal() }
         }
@@ -238,6 +250,12 @@ final class ClipboardHistoryWindowController: NSWindowController, NSWindowDelega
         let isImage = displayedItems.indices.contains(row) && displayedItems[row].kind == .image
         menu.items.first(where: { $0.action == #selector(editSelectedImage) })?.isHidden = !isImage
     }
+
+    func windowDidResignKey(_ notification: Notification) {
+        service.setPanelVisible(false)
+    }
+
+    func windowWillClose(_ notification: Notification) { service.setPanelVisible(false) }
 }
 
 private final class ClipboardHistoryTableView: NSTableView {
@@ -315,7 +333,15 @@ private final class ClipboardHistoryCellView: NSTableCellView {
     }
 
     func updatePreview(_ image: NSImage?, fallbackSymbol: String, title: String) {
+        let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        if !reduceMotion { preview.alphaValue = 0 }
         preview.image = image ?? NSImage(systemSymbolName: fallbackSymbol, accessibilityDescription: title)
+        if !reduceMotion {
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.14
+                preview.animator().alphaValue = 1
+            }
+        }
     }
 
     override func layout() {

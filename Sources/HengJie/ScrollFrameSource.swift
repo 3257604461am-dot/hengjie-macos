@@ -3,8 +3,7 @@ import CoreImage
 import CoreMedia
 import ScreenCaptureKit
 
-@MainActor
-final class ScrollFrameSource {
+actor ScrollFrameSource {
     private let rect: CGRect
     private let snapshotService: ScreenCaptureService
     private var stream: SCStream?
@@ -19,25 +18,27 @@ final class ScrollFrameSource {
 
     func start() async throws -> AsyncStream<CGImage> {
         var storedContinuation: AsyncStream<CGImage>.Continuation?
-        let frames = AsyncStream<CGImage>(bufferingPolicy: .bufferingNewest(8)) { value in
+        let frames = AsyncStream<CGImage>(bufferingPolicy: .bufferingNewest(4)) { value in
             storedContinuation = value
         }
         continuation = storedContinuation
 
-        let matchingScreens = NSScreen.screens.filter {
-            let intersection = $0.frame.intersection(rect)
-            return !intersection.isNull && !intersection.isEmpty
+        let screen = await MainActor.run { () -> (frame: CGRect, scale: CGFloat, displayID: CGDirectDisplayID)? in
+            let matching = NSScreen.screens.filter {
+                let intersection = $0.frame.intersection(rect)
+                return !intersection.isNull && !intersection.isEmpty
+            }
+            guard matching.count == 1, let screen = matching.first, screen.frame.contains(rect),
+                  let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else { return nil }
+            return (screen.frame, screen.backingScaleFactor, CGDirectDisplayID(number.uint32Value))
         }
-        guard matchingScreens.count == 1, let screen = matchingScreens.first,
-              screen.frame.contains(rect) else {
+        guard let screen else {
             startSnapshotFallback()
             return frames
         }
 
-        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
-        guard let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber,
-              let display = content.displays.first(where: { $0.displayID == CGDirectDisplayID(number.uint32Value) })
-        else {
+        let content = try await CaptureContentProvider.shared.content()
+        guard let display = content.displays.first(where: { $0.displayID == screen.displayID }) else {
             startSnapshotFallback()
             return frames
         }
@@ -52,16 +53,16 @@ final class ScrollFrameSource {
         let filter = SCContentFilter(display: display, excludingApplications: excluded, exceptingWindows: [])
         let configuration = SCStreamConfiguration()
         configuration.sourceRect = localRect
-        configuration.width = max(1, Int(localRect.width * screen.backingScaleFactor))
-        configuration.height = max(1, Int(localRect.height * screen.backingScaleFactor))
+        configuration.width = max(1, Int(localRect.width * screen.scale))
+        configuration.height = max(1, Int(localRect.height * screen.scale))
         configuration.minimumFrameInterval = CMTime(value: 1, timescale: 12)
-        configuration.queueDepth = 5
+        configuration.queueDepth = 3
         configuration.showsCursor = false
         configuration.capturesAudio = false
         configuration.pixelFormat = kCVPixelFormatType_32BGRA
 
         let output = ScrollStreamOutput { [weak self] image in
-            Task { @MainActor in self?.continuation?.yield(image) }
+            Task { await self?.yield(image) }
         }
         let stream = SCStream(filter: filter, configuration: configuration, delegate: output)
         try stream.addStreamOutput(output, type: .screen, sampleHandlerQueue: output.queue)
@@ -86,11 +87,15 @@ final class ScrollFrameSource {
             guard let self else { return }
             while !Task.isCancelled {
                 if let image = try? await snapshotService.capture(globalRect: rect) {
-                    continuation?.yield(image)
+                    await self.yield(image)
                 }
                 try? await Task.sleep(for: .milliseconds(120))
             }
         }
+    }
+
+    private func yield(_ image: CGImage) {
+        continuation?.yield(image)
     }
 }
 

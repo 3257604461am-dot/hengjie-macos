@@ -14,6 +14,8 @@ final class ScrollCaptureController: NSWindowController {
     private var paused = false
     private var completed = false
     private var lastAutoScrollAt = Date.distantPast
+    private var lastProgressUpdateAt = Date.distantPast
+    private var lastMatchLogAt = Date.distantPast
 
     private let statusLabel = NSTextField(labelWithString: "准备采集…")
     private let progressLabel = NSTextField(labelWithString: "0 帧")
@@ -117,12 +119,15 @@ final class ScrollCaptureController: NSWindowController {
                             updateProgress(confidence: nil)
                         case let .accepted(match):
                             updateProgress(confidence: match.confidence)
-                            DiagnosticLogger.shared.log("stitch", "frame_accepted", fields: [
-                                "confidence": String(format: "%.3f", match.confidence),
-                                "coverage": String(format: "%.3f", match.effectiveCoverage),
-                                "ambiguity": String(format: "%.3f", match.ambiguity),
-                                "overlap": "\(match.overlap)"
-                            ])
+                            if Date().timeIntervalSince(lastMatchLogAt) >= 1 {
+                                lastMatchLogAt = Date()
+                                DiagnosticLogger.shared.log("stitch", "frame_accepted", fields: [
+                                    "confidence": String(format: "%.3f", match.confidence),
+                                    "coverage": String(format: "%.3f", match.effectiveCoverage),
+                                    "ambiguity": String(format: "%.3f", match.ambiguity),
+                                    "overlap": "\(match.overlap)"
+                                ])
+                            }
                         case .unchanged:
                             break
                         case .waitingForMoreFrames:
@@ -232,6 +237,8 @@ final class ScrollCaptureController: NSWindowController {
         DiagnosticLogger.shared.log("stitch", "session_paused", fields: ["reason": reason.rawValue])
     }
     private func updateProgress(confidence: Double?) {
+        guard Date().timeIntervalSince(lastProgressUpdateAt) >= 0.1 else { return }
+        lastProgressUpdateAt = Date()
         let axisLength = axis == .horizontal ? Int(session.pixelSize.width) : Int(session.pixelSize.height)
         let confidenceText = confidence.map { " · 匹配 \(Int($0 * 100))%" } ?? ""
         progressLabel.stringValue = "\(session.frameCount) 帧 · \(axisLength) px\(confidenceText)"

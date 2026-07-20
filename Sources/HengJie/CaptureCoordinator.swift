@@ -51,7 +51,7 @@ final class CaptureCoordinator {
             countdown.onReady = { [weak self, weak countdown] in
                 self?.delayedCaptureController = nil
                 countdown?.onReady = nil
-                self?.captureStandard(rect, waitForOverlay: false)
+                self?.captureStandard(rect)
             }
             countdown.onCancel = { [weak self] in self?.delayedCaptureController = nil }
             delayedCaptureController = countdown
@@ -268,12 +268,11 @@ final class CaptureCoordinator {
         return true
     }
 
-    private func captureStandard(_ rect: CGRect, waitForOverlay: Bool = true) {
+    private func captureStandard(_ rect: CGRect) {
         Task {
-            if waitForOverlay { try? await Task.sleep(for: .milliseconds(100)) }
             do {
                 let image = try await service.capture(globalRect: rect)
-                let historyID = await ScreenshotHistoryService.shared.create(image: image, displaySize: rect.size, kind: .standard)
+                let historyID = ScreenshotHistoryService.shared.create(image: image, displaySize: rect.size, kind: .standard)
                 let controller = StandardCaptureOverlayController(image: image, globalRect: rect, historyID: historyID) { [weak self] in
                     self?.standardController = nil
                 }
@@ -287,7 +286,6 @@ final class CaptureCoordinator {
 
     private func capturePin(_ rect: CGRect) {
         Task {
-            try? await Task.sleep(for: .milliseconds(100))
             do {
                 let image = try await service.capture(globalRect: rect)
                 PinWindowController(image: image, displaySize: rect.size, preferredFrame: rect).present()
@@ -334,7 +332,7 @@ final class CaptureCoordinator {
             guard let self else { return }
             let displaySize = CGSize(width: image.width, height: image.height)
             let historyID: UUID? = if let kind {
-                await ScreenshotHistoryService.shared.create(image: image, displaySize: displaySize, kind: kind)
+                ScreenshotHistoryService.shared.create(image: image, displaySize: displaySize, kind: kind)
             } else { nil }
             presentEditor(image: image, displaySize: displaySize, annotations: [], historyID: historyID)
         }

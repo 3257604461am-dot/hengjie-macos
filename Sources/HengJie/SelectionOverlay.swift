@@ -1,5 +1,6 @@
 import AppKit
 import HengJieCore
+import QuartzCore
 
 enum SelectionConstraint: Equatable {
     case free
@@ -41,10 +42,18 @@ final class SelectionOverlayController: NSWindowController {
     required init?(coder: NSCoder) { nil }
 
     func begin() {
+        let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        window?.alphaValue = reduceMotion ? 1 : 0
         showWindow(nil)
         window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         window?.makeFirstResponder(window?.contentView)
+        guard !reduceMotion else { return }
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.14
+            context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            window?.animator().alphaValue = 1
+        }
     }
 
     private func finish(_ rect: CGRect?) {
@@ -63,6 +72,11 @@ final class SelectionOverlayView: NSView {
     private var phase: SelectionPhase = .idle
     private var constraint: SelectionConstraint = .free
     private weak var constraintBar: SelectionConstraintBar?
+    private var cachedWindowRects: [CGRect] = []
+    private var windowRefreshPending = false
+    private var lastWindowRefresh = Date.distantPast
+    private var redrawWorkItem: DispatchWorkItem?
+    private var lastRedrawAt = Date.distantPast
 
     init(frame frameRect: NSRect, allowsConstraints: Bool) {
         super.init(frame: frameRect)
@@ -70,7 +84,7 @@ final class SelectionOverlayView: NSView {
             let bar = SelectionConstraintBar(frame: CGRect(x: 20, y: frameRect.height - 54, width: 590, height: 40))
             bar.onChange = { [weak self] value in
                 self?.constraint = value
-                self?.needsDisplay = true
+                self?.scheduleRedraw(force: true)
             }
             addSubview(bar)
             constraintBar = bar
@@ -87,7 +101,8 @@ final class SelectionOverlayView: NSView {
         if let location = window?.mouseLocationOutsideOfEventStream {
             cursorPoint = convert(location, from: nil)
             positionConstraintBar(near: cursorPoint)
-            needsDisplay = true
+            refreshWindowRectsIfNeeded(force: true)
+            scheduleRedraw(force: true)
         }
     }
 
@@ -95,7 +110,7 @@ final class SelectionOverlayView: NSView {
         phase = .selecting
         start = convert(event.locationInWindow, from: nil)
         current = start
-        needsDisplay = true
+        scheduleRedraw(force: true)
     }
 
     override func rightMouseDown(with event: NSEvent) {
@@ -105,13 +120,14 @@ final class SelectionOverlayView: NSView {
     override func mouseDragged(with event: NSEvent) {
         current = constrainedPoint(convert(event.locationInWindow, from: nil))
         cursorPoint = current ?? .zero
-        needsDisplay = true
+        scheduleRedraw()
     }
 
     override func mouseMoved(with event: NSEvent) {
         cursorPoint = convert(event.locationInWindow, from: nil)
         hoveredWindowRect = windowRect(at: cursorPoint)
-        needsDisplay = true
+        refreshWindowRectsIfNeeded()
+        scheduleRedraw()
     }
 
     override func mouseUp(with event: NSEvent) {
@@ -125,7 +141,7 @@ final class SelectionOverlayView: NSView {
             phase = .idle
             start = nil
             current = nil
-            needsDisplay = true
+            scheduleRedraw(force: true)
             return
         }
         if rect.width >= 4, rect.height >= 4 {
@@ -138,7 +154,7 @@ final class SelectionOverlayView: NSView {
             phase = .idle
             start = nil
             current = nil
-            needsDisplay = true
+            scheduleRedraw(force: true)
         }
     }
 
@@ -260,22 +276,63 @@ final class SelectionOverlayView: NSView {
     }
 
     private func windowRect(at localPoint: CGPoint) -> CGRect? {
-        guard let window else { return nil }
-        let appKitPoint = window.convertPoint(toScreen: localPoint)
+        cachedWindowRects.first { $0.contains(localPoint) }
+    }
+
+    private func refreshWindowRectsIfNeeded(force: Bool = false) {
+        guard let window, !windowRefreshPending,
+              force || Date().timeIntervalSince(lastWindowRefresh) >= 0.12 else { return }
+        windowRefreshPending = true
         let mainTop = NSScreen.screens.first?.frame.maxY ?? 0
-        guard let info = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else { return nil }
-        for entry in info {
-            guard (entry[kCGWindowLayer as String] as? NSNumber)?.intValue == 0,
-                  let ownerPID = (entry[kCGWindowOwnerPID as String] as? NSNumber)?.intValue,
-                  ownerPID != ProcessInfo.processInfo.processIdentifier,
-                  let boundsDictionary = entry[kCGWindowBounds as String] as? NSDictionary,
-                  let cgRect = CGRect(dictionaryRepresentation: boundsDictionary as CFDictionary) else { continue }
-            let appKitRect = CGRect(x: cgRect.minX, y: mainTop - cgRect.maxY, width: cgRect.width, height: cgRect.height)
-            if appKitRect.contains(appKitPoint) {
-                return appKitRect.offsetBy(dx: -window.frame.minX, dy: -window.frame.minY)
+        let windowOrigin = window.frame.origin
+        let ownPID = ProcessInfo.processInfo.processIdentifier
+        DispatchQueue.global(qos: .userInteractive).async {
+            let info = CGWindowListCopyWindowInfo(
+                [.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID
+            ) as? [[String: Any]] ?? []
+            let rects = info.compactMap { entry -> CGRect? in
+                guard (entry[kCGWindowLayer as String] as? NSNumber)?.intValue == 0,
+                      let ownerPID = (entry[kCGWindowOwnerPID as String] as? NSNumber)?.intValue,
+                      ownerPID != ownPID,
+                      let dictionary = entry[kCGWindowBounds as String] as? NSDictionary,
+                      let cgRect = CGRect(dictionaryRepresentation: dictionary as CFDictionary),
+                      cgRect.width >= 4, cgRect.height >= 4 else { return nil }
+                return CGRect(
+                    x: cgRect.minX - windowOrigin.x,
+                    y: mainTop - cgRect.maxY - windowOrigin.y,
+                    width: cgRect.width,
+                    height: cgRect.height
+                )
+            }
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                cachedWindowRects = rects
+                lastWindowRefresh = Date()
+                windowRefreshPending = false
+                hoveredWindowRect = windowRect(at: cursorPoint)
+                scheduleRedraw()
             }
         }
-        return nil
+    }
+
+    private func scheduleRedraw(force: Bool = false) {
+        if force {
+            redrawWorkItem?.cancel()
+            redrawWorkItem = nil
+            lastRedrawAt = Date()
+            needsDisplay = true
+            return
+        }
+        guard redrawWorkItem == nil else { return }
+        let interval = max(0, (1.0 / 60.0) - Date().timeIntervalSince(lastRedrawAt))
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            redrawWorkItem = nil
+            lastRedrawAt = Date()
+            needsDisplay = true
+        }
+        redrawWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + interval, execute: work)
     }
 }
 

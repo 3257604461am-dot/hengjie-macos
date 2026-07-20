@@ -1,4 +1,5 @@
 import AppKit
+import QuartzCore
 
 @MainActor
 final class StandardCaptureOverlayController: NSWindowController {
@@ -21,7 +22,7 @@ final class StandardCaptureOverlayController: NSWindowController {
         let localRect = globalRect.offsetBy(dx: -union.minX, dy: -union.minY)
         let editor = InlineEditingOverlayView(frame: CGRect(origin: .zero, size: union.size), image: image, selectionRect: localRect)
         editor.onFinish = { [weak self] image, annotations in
-            ImageExport.copy(image)
+            ImageExport.copy(image, displaySize: globalRect.size)
             if let historyID { ScreenshotHistoryService.shared.complete(id: historyID, annotations: annotations) }
             self?.finish()
         }
@@ -63,7 +64,7 @@ private final class CapturePanel: NSPanel {
 
 @MainActor
 final class InlineEditingOverlayView: NSView {
-    var onFinish: ((NSImage, [AnnotationMarkRecord]) -> Void)?
+    var onFinish: ((CGImage, [AnnotationMarkRecord]) -> Void)?
     var onCancel: (() -> Void)?
     var onProjectChange: (([AnnotationMarkRecord]) -> Void)?
     private let canvas: AnnotationCanvas
@@ -79,9 +80,20 @@ final class InlineEditingOverlayView: NSView {
         addSubview(canvas)
         addSubview(toolbar)
         positionToolbar()
+        if !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            toolbar.alphaValue = 0
+            DispatchQueue.main.async { [weak toolbar] in
+                NSAnimationContext.runAnimationGroup { context in
+                    context.duration = 0.16
+                    context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                    toolbar?.animator().alphaValue = 1
+                }
+            }
+        }
         toolbar.onFinish = { [weak self] in
             guard let self else { return }
-            self.onFinish?(self.canvas.renderedImage(), self.canvas.annotationRecords())
+            guard let image = self.canvas.renderedCGImage() else { return }
+            self.onFinish?(image, self.canvas.annotationRecords())
         }
         toolbar.onCancel = { [weak self] in self?.onCancel?() }
         canvas.onHistoryChange = { [weak self] in
@@ -95,7 +107,7 @@ final class InlineEditingOverlayView: NSView {
 
     override func keyDown(with event: NSEvent) {
         if event.keyCode == 53 { onCancel?() }
-        else if event.keyCode == 36 { onFinish?(canvas.renderedImage(), canvas.annotationRecords()) }
+        else if event.keyCode == 36, let image = canvas.renderedCGImage() { onFinish?(image, canvas.annotationRecords()) }
         else { super.keyDown(with: event) }
     }
 
@@ -215,13 +227,16 @@ final class InlineAnnotationToolbar: NSVisualEffectView {
         if let text = AnnotationEditorWindowController.requestText(title: "添加水印", prompt: "水印将以半透明方式平铺") { canvas.addWatermark(text) }
     }
     @objc private func recognizeText() {
-        let image = canvas.renderedImage()
+        guard let image = canvas.renderedCGImage() else { return }
         let controller = OCRResultWindowController.presentRecognizing()
-        controller.recognize(image)
+        controller.recognize(image, displaySize: canvas.bounds.size)
     }
     @objc private func saveImage() {
-        do { try ImageExport.save(canvas.renderedImage(), format: AppPreferences.shared.saveFormat) }
-        catch { NSAlert(error: error).runModal() }
+        guard let image = canvas.renderedCGImage() else { return }
+        Task {
+            do { _ = try await ImageExport.saveAsync(image, format: AppPreferences.shared.saveFormat) }
+            catch { NSAlert(error: error).runModal() }
+        }
     }
     @objc private func cancel() { onCancel?() }
     @objc private func finish() { onFinish?() }

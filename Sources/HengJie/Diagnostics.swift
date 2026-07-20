@@ -2,14 +2,14 @@ import AppKit
 import Foundation
 import OSLog
 
-@MainActor
-final class DiagnosticLogger {
+final class DiagnosticLogger: @unchecked Sendable {
     static let shared = DiagnosticLogger()
 
     private let logger = Logger(subsystem: "com.wonderlab.hengjie", category: "runtime")
     private let directory: URL
     private let sessionURL: URL
     private let markerURL: URL
+    private let ioQueue = DispatchQueue(label: "com.wonderlab.hengjie.diagnostics", qos: .utility)
     private var handle: FileHandle?
 
     private init() {
@@ -34,16 +34,24 @@ final class DiagnosticLogger {
     }
 
     func finishSession() {
-        write(category: "lifecycle", event: "session_finished", fields: [:])
-        try? handle?.synchronize()
-        try? handle?.close()
-        handle = nil
-        try? FileManager.default.removeItem(at: markerURL)
+        ioQueue.sync {
+            writeImmediately(category: "lifecycle", event: "session_finished", fields: [:])
+            try? handle?.synchronize()
+            try? handle?.close()
+            handle = nil
+            try? FileManager.default.removeItem(at: markerURL)
+        }
     }
 
     var logsDirectory: URL { directory }
 
     private func write(category: String, event: String, fields: [String: String]) {
+        ioQueue.async { [self] in
+            writeImmediately(category: category, event: event, fields: fields)
+        }
+    }
+
+    private func writeImmediately(category: String, event: String, fields: [String: String]) {
         let safeFields = fields.mapValues { String($0.prefix(240)) }
         let object: [String: Any] = [
             "timestamp": Date().ISO8601Format(),

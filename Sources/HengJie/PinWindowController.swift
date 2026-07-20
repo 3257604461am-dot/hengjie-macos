@@ -135,7 +135,10 @@ final class PinWindowController: NSWindowController, NSWindowDelegate {
     }
 
     @objc private func undo() { canvas.undo() }
-    @objc private func copyImage() { ImageExport.copy(canvas.renderedImage()) }
+    @objc private func copyImage() {
+        guard let image = canvas.renderedCGImage() else { return }
+        ImageExport.copy(image, displaySize: canvas.bounds.size)
+    }
     @objc private func unpin() { close() }
 
     func windowWillResize(_ sender: NSWindow, to frameSize: NSSize) -> NSSize {
