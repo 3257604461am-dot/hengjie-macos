@@ -196,23 +196,29 @@ final class AnnotationEditorWindowController: NSWindowController, NSWindowDelega
     }
 
     @objc private func copyImage() {
-        ImageExport.copy(canvas.renderedImage())
+        guard let image = canvas.renderedCGImage() else { return }
+        ImageExport.copy(image, displaySize: canvas.bounds.size)
         completeHistoryIfNeeded()
         transientNotice("已复制到剪贴板")
     }
 
     @objc private func saveImage() {
-        do {
-            try ImageExport.save(canvas.renderedImage(), format: AppPreferences.shared.saveFormat)
-            completeHistoryIfNeeded()
+        guard let image = canvas.renderedCGImage() else { return }
+        Task { [weak self] in
+            do {
+                if try await ImageExport.saveAsync(image, format: AppPreferences.shared.saveFormat) {
+                    self?.completeHistoryIfNeeded()
+                }
+            } catch {
+                NSAlert(error: error).runModal()
+            }
         }
-        catch { NSAlert(error: error).runModal() }
     }
 
     @objc private func recognizeText() {
-        let image = canvas.renderedImage()
+        guard let image = canvas.renderedCGImage() else { return }
         let controller = OCRResultWindowController.presentRecognizing()
-        controller.recognize(image)
+        controller.recognize(image, displaySize: canvas.bounds.size)
     }
 
     private func transientNotice(_ text: String) {

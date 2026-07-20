@@ -3,6 +3,12 @@ import ScreenCaptureKit
 
 @MainActor
 final class ScreenCaptureService {
+    private let contentProvider: CaptureContentProvider
+
+    init(contentProvider: CaptureContentProvider? = nil) {
+        self.contentProvider = contentProvider ?? .shared
+    }
+
     enum CaptureError: LocalizedError {
         case noDisplay
         case permissionDenied
@@ -18,8 +24,20 @@ final class ScreenCaptureService {
     }
 
     func capture(globalRect: CGRect) async throws -> CGImage {
+        let trace = PerformanceTrace.begin("ScreenCapture")
+        defer { PerformanceTrace.end("ScreenCapture", trace) }
         guard CGPreflightScreenCaptureAccess() else { throw CaptureError.permissionDenied }
-        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+        let content = try await contentProvider.content()
+        do {
+            return try await capture(globalRect: globalRect, content: content)
+        } catch CaptureError.captureFailed {
+            contentProvider.invalidate()
+            let refreshed = try await contentProvider.content(forceRefresh: true)
+            return try await capture(globalRect: globalRect, content: refreshed)
+        }
+    }
+
+    private func capture(globalRect: CGRect, content: SCShareableContent) async throws -> CGImage {
         let screens = NSScreen.screens
         let pieces = screens.compactMap { screen -> (NSScreen, CGRect)? in
             let intersection = screen.frame.intersection(globalRect)

@@ -287,9 +287,22 @@ private actor ClipboardHistoryStore {
         }
     }
 
-    func thumbnailData(for item: ClipboardHistoryItem) -> Data? {
+    func thumbnailImage(for item: ClipboardHistoryItem) -> CGImage? {
         guard let name = item.thumbnailFileName else { return nil }
-        return try? Data(contentsOf: payloadDirectory(for: item.id).appendingPathComponent(name))
+        let url = payloadDirectory(for: item.id).appendingPathComponent(name)
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
+        return CGImageSourceCreateImageAtIndex(source, 0, nil)
+    }
+
+    func sourceImage(for item: ClipboardHistoryItem) -> CGImage? {
+        for representation in item.representations {
+            let url = payloadDirectory(for: item.id).appendingPathComponent(representation.fileName)
+            guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+                  CGImageSourceGetCount(source) > 0,
+                  let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else { continue }
+            return image
+        }
+        return nil
     }
 
     func remove(_ ids: [UUID]) {
@@ -321,7 +334,6 @@ final class ClipboardHistoryService {
 
     private(set) var items: [ClipboardHistoryItem] = []
     private(set) var statusMessage: String?
-    var onChange: (() -> Void)?
 
     private let pasteboard: NSPasteboard
     private let processor = ClipboardHistoryProcessor()
@@ -334,6 +346,10 @@ final class ClipboardHistoryService {
     private var restoreTask: Task<Void, Never>?
     private var wantsRunning = false
     private var waitingForRestore = false
+    private var pollInterval: TimeInterval = 0.25
+    private var lastPasteboardActivity = Date()
+    private var isPanelVisible = false
+    private var observers: [UUID: () -> Void] = [:]
 
     init(pasteboard: NSPasteboard = .general, rootURL: URL? = nil) {
         self.pasteboard = pasteboard
@@ -347,7 +363,7 @@ final class ClipboardHistoryService {
             items = await store.load()
             pruneExpired()
             scheduleSave()
-            onChange?()
+            notifyObservers()
         }
     }
 
@@ -374,12 +390,19 @@ final class ClipboardHistoryService {
     private func startTimer() {
         observedChangeCount = pasteboard.changeCount
         ignoredChangeCount = nil
-        let timer = Timer(timeInterval: 0.25, repeats: true) { [weak self] _ in
+        lastPasteboardActivity = Date()
+        installTimer(interval: 0.25)
+        DiagnosticLogger.shared.log("clipboard", "monitor_started")
+    }
+
+    private func installTimer(interval: TimeInterval) {
+        timer?.invalidate()
+        pollInterval = interval
+        let timer = Timer(timeInterval: interval, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.pollPasteboard() }
         }
         RunLoop.main.add(timer, forMode: .common)
         self.timer = timer
-        DiagnosticLogger.shared.log("clipboard", "monitor_started")
     }
 
     func stop() {
@@ -388,6 +411,16 @@ final class ClipboardHistoryService {
         timer = nil
         ignoredChangeCount = nil
         DiagnosticLogger.shared.log("clipboard", "monitor_stopped")
+    }
+
+    func suspend() {
+        timer?.invalidate()
+        timer = nil
+    }
+
+    func resume() {
+        guard wantsRunning, timer == nil else { return }
+        startTimer()
     }
 
     func filteredItems(query: String, filter: ClipboardHistoryFilter, timeFilter: ClipboardHistoryTimeFilter = .all) -> [ClipboardHistoryItem] {
@@ -405,13 +438,26 @@ final class ClipboardHistoryService {
         }
     }
 
+    func setPanelVisible(_ visible: Bool) {
+        isPanelVisible = visible
+        if visible, isRunning, pollInterval != 0.25 { installTimer(interval: 0.25) }
+    }
+
+    func trimCaches() { imageCache.removeAllObjects() }
+
+    func observe(_ handler: @escaping () -> Void) -> HistoryObservationToken {
+        let id = UUID()
+        observers[id] = handler
+        return HistoryObservationToken { [weak self] in self?.observers[id] = nil }
+    }
+
     func copyToPasteboard(_ item: ClipboardHistoryItem) {
         Task { [weak self] in
             guard let self else { return }
             let values = await store.readPayload(item)
             guard !values.isEmpty else {
                 statusMessage = "历史内容文件已丢失，无法复制。"
-                onChange?()
+                notifyObservers()
                 return
             }
             let pasteboardItem = NSPasteboardItem()
@@ -434,30 +480,26 @@ final class ClipboardHistoryService {
         if let cached = imageCache.object(forKey: item.id as NSUUID) { completion(cached); return }
         Task { [weak self] in
             guard let self else { return }
-            let data = await store.thumbnailData(for: item)
-            let image = data.flatMap(NSImage.init(data:))
-            if let image { imageCache.setObject(image, forKey: item.id as NSUUID, cost: data?.count ?? 0) }
+            let cgImage = await store.thumbnailImage(for: item)
+            let image = cgImage.map { NSImage(cgImage: $0, size: NSSize(width: $0.width, height: $0.height)) }
+            if let image, let cgImage {
+                imageCache.setObject(image, forKey: item.id as NSUUID, cost: cgImage.bytesPerRow * cgImage.height)
+            }
             completion(image)
         }
     }
 
     func loadImage(_ item: ClipboardHistoryItem) async throws -> CGImage {
         guard item.kind == .image else { throw ClipboardHistoryImageError.notImage }
-        let values = await store.readPayload(item)
-        guard !values.isEmpty else { throw ClipboardHistoryImageError.missingPayload }
-        for (_, data) in values {
-            guard let source = CGImageSourceCreateWithData(data as CFData, nil),
-                  CGImageSourceGetCount(source) > 0,
-                  let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else { continue }
-            return image
-        }
-        throw ClipboardHistoryImageError.invalidImage
+        guard !item.representations.isEmpty else { throw ClipboardHistoryImageError.missingPayload }
+        guard let image = await store.sourceImage(for: item) else { throw ClipboardHistoryImageError.invalidImage }
+        return image
     }
 
     func togglePinned(_ id: UUID) {
         guard let index = items.firstIndex(where: { $0.id == id }) else { return }
         items[index].isPinned.toggle()
-        scheduleSave(); onChange?()
+        scheduleSave(); notifyObservers()
     }
 
     func delete(_ id: UUID) {
@@ -466,7 +508,7 @@ final class ClipboardHistoryService {
         imageCache.removeObject(forKey: id as NSUUID)
         Task { await store.remove([id]) }
         statusMessage = nil
-        scheduleSave(); onChange?()
+        scheduleSave(); notifyObservers()
     }
 
     func clearUnpinned() {
@@ -475,7 +517,7 @@ final class ClipboardHistoryService {
         removed.forEach { imageCache.removeObject(forKey: $0 as NSUUID) }
         Task { await store.remove(removed) }
         statusMessage = nil
-        scheduleSave(); onChange?()
+        scheduleSave(); notifyObservers()
     }
 
     func clearAll() {
@@ -483,12 +525,19 @@ final class ClipboardHistoryService {
         imageCache.removeAllObjects()
         Task { await store.clear(); try? await store.saveIndex([]) }
         statusMessage = nil
-        onChange?()
+        notifyObservers()
     }
 
     private func pollPasteboard() {
         let current = pasteboard.changeCount
-        guard current != observedChangeCount else { return }
+        guard current != observedChangeCount else {
+            if !isPanelVisible, pollInterval < 0.75, Date().timeIntervalSince(lastPasteboardActivity) >= 5 {
+                installTimer(interval: 0.75)
+            }
+            return
+        }
+        lastPasteboardActivity = Date()
+        if pollInterval != 0.25 { installTimer(interval: 0.25) }
         observedChangeCount = current
         if ignoredChangeCount == current { ignoredChangeCount = nil; return }
         guard let item = pasteboard.pasteboardItems?.first else { return }
@@ -510,7 +559,7 @@ final class ClipboardHistoryService {
             switch await processor.process(snapshot) {
             case let .success(payload): await add(payload)
             case let .failure(.rejected(message)):
-                statusMessage = message; onChange?()
+                statusMessage = message; notifyObservers()
             case .failure(.ignored): break
             }
         }
@@ -522,7 +571,7 @@ final class ClipboardHistoryService {
             duplicate.lastUsedAt = Date()
             items.insert(duplicate, at: 0)
             statusMessage = nil
-            scheduleSave(); onChange?()
+            scheduleSave(); notifyObservers()
             return
         }
         pruneExpired()
@@ -530,7 +579,7 @@ final class ClipboardHistoryService {
         while items.count >= Self.maximumItemCount || totalBytes + payload.byteCount > Self.maximumTotalBytes {
             guard let index = items.lastIndex(where: { !$0.isPinned }) else {
                 statusMessage = "历史已满且全部固定，请取消固定或删除部分记录。"
-                onChange?(); return
+                notifyObservers(); return
             }
             removed.append(items.remove(at: index).id)
         }
@@ -545,10 +594,10 @@ final class ClipboardHistoryService {
                 representations: stored.0, searchText: payload.searchText, thumbnailFileName: stored.1
             ), at: 0)
             statusMessage = nil
-            scheduleSave(); onChange?()
+            scheduleSave(); notifyObservers()
         } catch {
             statusMessage = "无法保存剪贴板历史：\(error.localizedDescription)"
-            onChange?()
+            notifyObservers()
         }
     }
 
@@ -557,7 +606,7 @@ final class ClipboardHistoryService {
         var item = items.remove(at: index)
         item.lastUsedAt = Date()
         items.insert(item, at: 0)
-        scheduleSave(); onChange?()
+        scheduleSave(); notifyObservers()
     }
 
     private func scheduleSave() {
@@ -577,6 +626,10 @@ final class ClipboardHistoryService {
     }
 
     private var totalBytes: Int64 { items.reduce(0) { $0 + $1.byteCount } }
+
+    private func notifyObservers() {
+        observers.values.forEach { $0() }
+    }
 
     private func containsExcludedType(_ types: Set<String>) -> Bool {
         let fragments = [

@@ -8,6 +8,7 @@ final class ScreenshotHistoryWindowController: NSWindowController, NSWindowDeleg
     private let filterControl = NSSegmentedControl(labels: ScreenshotHistoryFilter.allCases.map(\.title), trackingMode: .selectOne, target: nil, action: nil)
     private let statusLabel = NSTextField(wrappingLabelWithString: "")
     private var displayedItems: [ScreenshotHistoryItem] = []
+    private var changeObservation: HistoryObservationToken?
 
     init(service: ScreenshotHistoryService, onEdit: @escaping (LoadedScreenshotProject) -> Void) {
         self.service = service
@@ -21,7 +22,7 @@ final class ScreenshotHistoryWindowController: NSWindowController, NSWindowDeleg
         super.init(window: window)
         window.delegate = self
         buildUI()
-        service.onChange = { [weak self] in self?.reload() }
+        changeObservation = service.observe { [weak self] in self?.reload() }
     }
 
     required init?(coder: NSCoder) { nil }
@@ -99,8 +100,13 @@ final class ScreenshotHistoryWindowController: NSWindowController, NSWindowDeleg
 
     private func reload() {
         let filter = ScreenshotHistoryFilter(rawValue: filterControl.selectedSegment) ?? .all
+        let previousIDs = displayedItems.map(\.id)
         displayedItems = service.filteredItems(filter)
-        tableView.reloadData()
+        if previousIDs != displayedItems.map(\.id) {
+            tableView.reloadData()
+        } else if !displayedItems.isEmpty {
+            tableView.reloadData(forRowIndexes: IndexSet(integersIn: 0..<displayedItems.count), columnIndexes: IndexSet(integer: 0))
+        }
         let bytes = ByteCountFormatter.string(fromByteCount: service.items.reduce(0) { $0 + $1.byteCount }, countStyle: .file)
         statusLabel.stringValue = service.statusMessage ?? "\(service.items.count)/100 条 · \(bytes) · 最长保留 30 天"
         statusLabel.textColor = service.statusMessage == nil ? .secondaryLabelColor : .systemOrange
@@ -142,16 +148,20 @@ final class ScreenshotHistoryWindowController: NSWindowController, NSWindowDeleg
         }
     }
 
-    @objc private func copySelected() { renderSelected { ImageExport.copy($0) } }
+    @objc private func copySelected() {
+        renderSelected { image, size in ImageExport.copy(image, displaySize: size) }
+    }
 
     @objc private func saveSelected() {
-        renderSelected { image in
-            do { try ImageExport.save(image, format: AppPreferences.shared.saveFormat) }
-            catch { NSAlert(error: error).runModal() }
+        renderSelected { image, _ in
+            Task {
+                do { _ = try await ImageExport.saveAsync(image, format: AppPreferences.shared.saveFormat) }
+                catch { NSAlert(error: error).runModal() }
+            }
         }
     }
 
-    private func renderSelected(_ action: @escaping (NSImage) -> Void) {
+    private func renderSelected(_ action: @escaping (CGImage, CGSize) -> Void) {
         guard let item = selectedItem else { NSSound.beep(); return }
         Task { [weak self] in
             guard let self else { return }
@@ -162,7 +172,7 @@ final class ScreenshotHistoryWindowController: NSWindowController, NSWindowDeleg
                     displaySize: CGSize(width: loaded.project.displayWidth, height: loaded.project.displayHeight)
                 )
                 canvas.restore(records: loaded.project.annotations)
-                action(canvas.renderedImage())
+                if let rendered = canvas.renderedCGImage() { action(rendered, canvas.bounds.size) }
             } catch { NSAlert(error: error).runModal() }
         }
     }
@@ -235,7 +245,18 @@ private final class ScreenshotHistoryCellView: NSTableCellView {
         state.textColor = item.state == .draft ? .systemOrange : .systemGreen
     }
 
-    func updateImage(_ image: NSImage?) { if let image { preview.image = image } }
+    func updateImage(_ image: NSImage?) {
+        guard let image else { return }
+        let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        if !reduceMotion { preview.alphaValue = 0 }
+        preview.image = image
+        if !reduceMotion {
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.14
+                preview.animator().alphaValue = 1
+            }
+        }
+    }
 
     private static let formatter: DateFormatter = {
         let formatter = DateFormatter()

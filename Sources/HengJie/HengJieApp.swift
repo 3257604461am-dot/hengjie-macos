@@ -44,6 +44,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         setupMenu()
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self, selector: #selector(workspaceWillSleep), name: NSWorkspace.willSleepNotification, object: nil
+        )
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self, selector: #selector(workspaceDidWake), name: NSWorkspace.didWakeNotification, object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(applicationDidResignActive), name: NSApplication.didResignActiveNotification, object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(screenParametersChanged), name: NSApplication.didChangeScreenParametersNotification, object: nil
+        )
         DiagnosticLogger.shared.log("lifecycle", "application_ready")
         hotKeyRegistry.install(name: "capture", id: 1) { [weak self] in self?.standardCapture() }
         hotKeyRegistry.install(name: "pin", id: 2) { [weak self] in self?.pinRegion() }
@@ -116,6 +128,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         GIFTemporaryFiles.cleanupStaleFiles()
         DiagnosticLogger.shared.finishSession()
     }
+
+    @objc private func workspaceWillSleep() { historyService.suspend() }
+    @objc private func workspaceDidWake() { historyService.resume() }
+    @objc private func applicationDidResignActive() {
+        historyService.trimCaches()
+        screenshotHistoryService.trimCaches()
+    }
+    @objc private func screenParametersChanged() { CaptureContentProvider.shared.invalidate() }
 
     private func openClipboardHistory() {
         if !AppPreferences.shared.clipboardHistoryConsentCompleted {

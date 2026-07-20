@@ -43,6 +43,11 @@ struct AnnotationMarkRecord: Codable, Hashable, Sendable {
     var text: String?
 }
 
+private struct MosaicGridKey: Hashable {
+    let x: Int
+    let y: Int
+}
+
 final class AnnotationCanvas: NSView {
     let sourceImage: NSImage
     private let sourceBitmap: NSBitmapImageRep?
@@ -53,14 +58,14 @@ final class AnnotationCanvas: NSView {
     var textEditProvider: ((String) -> String?)?
     var onHistoryChange: (() -> Void)?
 
-    private(set) var marks: [AnnotationMark] = []
-    private var undoSnapshots: [[AnnotationMark]] = []
-    private var redoSnapshots: [[AnnotationMark]] = []
+    private let document = AnnotationDocument()
+    var marks: [AnnotationMark] { document.marks }
     private var activePoints: [CGPoint] = []
     private var numberCounter = 1
     private var selectedMarkIndex: Int?
     private var editingStartPoint: CGPoint?
     private var editingOriginalPoints: [CGPoint] = []
+    private var editingOriginalMark: AnnotationMark?
     private var editingEndpointIndex: Int?
 
     init(image: CGImage, displaySize: CGSize? = nil) {
@@ -81,10 +86,7 @@ final class AnnotationCanvas: NSView {
         if oldSize.width > 0, oldSize.height > 0, newSize != oldSize {
             let scaleX = newSize.width / oldSize.width
             let scaleY = newSize.height / oldSize.height
-            for index in marks.indices {
-                marks[index].points = marks[index].points.map { CGPoint(x: $0.x * scaleX, y: $0.y * scaleY) }
-                marks[index].lineWidth *= min(scaleX, scaleY)
-            }
+            document.scale(x: scaleX, y: scaleY)
             activePoints = activePoints.map { CGPoint(x: $0.x * scaleX, y: $0.y * scaleY) }
         }
         super.setFrameSize(newSize)
@@ -92,7 +94,7 @@ final class AnnotationCanvas: NSView {
 
     override func draw(_ dirtyRect: NSRect) {
         sourceImage.draw(in: bounds)
-        for (index, mark) in marks.enumerated() {
+        for (index, mark) in marks.enumerated() where renderingBounds(mark).intersects(dirtyRect) {
             draw(mark)
             if index == selectedMarkIndex { drawSelection(for: mark) }
         }
@@ -107,14 +109,17 @@ final class AnnotationCanvas: NSView {
             selectedMarkIndex = hitTest(point)
             editingStartPoint = point
             editingOriginalPoints = selectedMarkIndex.map { marks[$0].points } ?? []
+            editingOriginalMark = selectedMarkIndex.map { marks[$0] }
             editingEndpointIndex = endpointIndex(at: point)
             if event.clickCount == 2,
                let index = selectedMarkIndex,
                marks[index].tool == .text,
                let oldValue = marks[index].text,
                let value = textEditProvider?(oldValue), !value.isEmpty {
-                pushUndoSnapshot()
-                marks[index].text = value
+                var changed = marks[index]
+                changed.text = value
+                document.replace(at: index, with: changed)
+                editingOriginalMark = document.marks[index]
                 onHistoryChange?()
             }
             needsDisplay = true
@@ -136,29 +141,46 @@ final class AnnotationCanvas: NSView {
            let index = selectedMarkIndex,
            let start = editingStartPoint,
            marks.indices.contains(index) {
-            if marks[index].points == editingOriginalPoints { pushUndoSnapshot() }
+            let previousBounds = renderingBounds(marks[index])
+            var changed = marks[index]
             if let endpoint = editingEndpointIndex, editingOriginalPoints.indices.contains(endpoint) {
                 var points = editingOriginalPoints
                 points[endpoint] = point
-                marks[index].points = points
+                changed.points = points
             } else {
                 let delta = CGPoint(x: point.x - start.x, y: point.y - start.y)
-                marks[index].points = editingOriginalPoints.map { CGPoint(x: $0.x + delta.x, y: $0.y + delta.y) }
+                changed.points = editingOriginalPoints.map { CGPoint(x: $0.x + delta.x, y: $0.y + delta.y) }
             }
-            needsDisplay = true
+            document.updateTransient(at: index, mark: changed)
+            setNeedsDisplay(previousBounds.union(renderingBounds(changed)).insetBy(dx: -12, dy: -12))
             return
         }
-        if [.pen, .highlighter, .mosaic].contains(selectedTool) { activePoints.append(point) }
+        let previousActiveBounds = activePoints.isEmpty ? CGRect.null : renderingBounds(
+            AnnotationMark(tool: selectedTool, points: activePoints, color: selectedColor, lineWidth: selectedLineWidth, text: nil)
+        )
+        if [.pen, .highlighter, .mosaic].contains(selectedTool) {
+            let minimumDistance = max(1.5, selectedLineWidth * 0.35)
+            if let last = activePoints.last, hypot(point.x - last.x, point.y - last.y) < minimumDistance {
+                activePoints[activePoints.count - 1] = point
+            } else {
+                activePoints.append(point)
+            }
+        }
         else if activePoints.count == 1 { activePoints.append(point) }
         else { activePoints[1] = point }
-        needsDisplay = true
+        let activeMark = AnnotationMark(tool: selectedTool, points: activePoints, color: selectedColor, lineWidth: selectedLineWidth, text: nil)
+        setNeedsDisplay(previousActiveBounds.union(renderingBounds(activeMark)).insetBy(dx: -4, dy: -4))
     }
 
     override func mouseUp(with event: NSEvent) {
         if selectedTool == .select {
-            if selectedMarkIndex != nil { onHistoryChange?() }
+            if let index = selectedMarkIndex, let original = editingOriginalMark {
+                document.commitTransient(at: index, before: original)
+                onHistoryChange?()
+            }
             editingStartPoint = nil
             editingOriginalPoints = []
+            editingOriginalMark = nil
             editingEndpointIndex = nil
             return
         }
@@ -169,9 +191,7 @@ final class AnnotationCanvas: NSView {
     }
 
     func undo() {
-        guard let previous = undoSnapshots.popLast() else { return }
-        redoSnapshots.append(marks)
-        marks = previous
+        guard document.undo() else { return }
         selectedMarkIndex = nil
         needsDisplay = true
         onHistoryChange?()
@@ -185,13 +205,12 @@ final class AnnotationCanvas: NSView {
         }
     }
 
-    var canUndo: Bool { !undoSnapshots.isEmpty }
-    var canRedo: Bool { !redoSnapshots.isEmpty }
+    var canUndo: Bool { document.canUndo }
+    var canRedo: Bool { document.canRedo }
 
     func deleteSelectedMark() {
         guard let index = selectedMarkIndex, marks.indices.contains(index) else { return }
-        pushUndoSnapshot()
-        marks.remove(at: index)
+        document.remove(at: index)
         selectedMarkIndex = nil
         needsDisplay = true
         onHistoryChange?()
@@ -216,7 +235,7 @@ final class AnnotationCanvas: NSView {
         let width = max(1, bounds.width)
         let height = max(1, bounds.height)
         let dimension = max(1, min(width, height))
-        marks = records.compactMap { record in
+        let restored: [AnnotationMark] = records.compactMap { record -> AnnotationMark? in
             guard let tool = AnnotationTool(rawValue: record.tool), tool != .select else { return nil }
             return AnnotationMark(
                 tool: tool,
@@ -226,18 +245,15 @@ final class AnnotationCanvas: NSView {
                 text: record.text
             )
         }
+        document.reset(restored)
         numberCounter = (marks.filter { $0.tool == .number }.compactMap { Int($0.text ?? "") }.max() ?? 0) + 1
-        undoSnapshots.removeAll()
-        redoSnapshots.removeAll()
         selectedMarkIndex = nil
         needsDisplay = true
         onHistoryChange?()
     }
 
     func redo() {
-        guard let next = redoSnapshots.popLast() else { return }
-        undoSnapshots.append(marks)
-        marks = next
+        guard document.redo() else { return }
         selectedMarkIndex = nil
         needsDisplay = true
         onHistoryChange?()
@@ -247,21 +263,23 @@ final class AnnotationCanvas: NSView {
         guard let index = selectedMarkIndex, marks.indices.contains(index) else { return }
         let mark = marks[index]
         guard mark.color != color || abs(mark.lineWidth - lineWidth) > 0.01 else { return }
-        pushUndoSnapshot()
-        marks[index].color = color
-        marks[index].lineWidth = lineWidth
+        var changed = mark
+        changed.color = color
+        changed.lineWidth = lineWidth
+        document.replace(at: index, with: changed)
         needsDisplay = true
         onHistoryChange?()
     }
 
     func addWatermark(_ text: String) {
-        pushUndoSnapshot()
-        marks.append(AnnotationMark(tool: .text, points: [CGPoint(x: bounds.midX, y: bounds.midY)], color: .secondaryLabelColor.withAlphaComponent(0.35), lineWidth: 24, text: "⟲WATERMARK⟲\(text)"))
+        document.append(AnnotationMark(tool: .text, points: [CGPoint(x: bounds.midX, y: bounds.midY)], color: .secondaryLabelColor.withAlphaComponent(0.35), lineWidth: 24, text: "⟲WATERMARK⟲\(text)"))
         needsDisplay = true
         onHistoryChange?()
     }
 
-    func renderedImage() -> NSImage {
+    func renderedCGImage() -> CGImage? {
+        let trace = PerformanceTrace.begin("AnnotationRender")
+        defer { PerformanceTrace.end("AnnotationRender", trace) }
         guard let representation = NSBitmapImageRep(
             bitmapDataPlanes: nil,
             pixelsWide: sourceBitmap?.pixelsWide ?? Int(bounds.width),
@@ -273,7 +291,7 @@ final class AnnotationCanvas: NSView {
             colorSpaceName: .deviceRGB,
             bytesPerRow: 0,
             bitsPerPixel: 0
-        ) else { return sourceImage }
+        ) else { return nil }
         representation.size = bounds.size
         let context = NSGraphicsContext(bitmapImageRep: representation)
         NSGraphicsContext.saveGraphicsState()
@@ -282,14 +300,11 @@ final class AnnotationCanvas: NSView {
         for mark in marks { draw(mark) }
         context?.flushGraphics()
         NSGraphicsContext.restoreGraphicsState()
-        let image = NSImage(size: bounds.size)
-        image.addRepresentation(representation)
-        return image
+        return representation.cgImage
     }
 
     private func commit(text: String?) {
-        pushUndoSnapshot()
-        marks.append(AnnotationMark(tool: selectedTool, points: activePoints, color: selectedColor, lineWidth: selectedLineWidth, text: text))
+        document.append(AnnotationMark(tool: selectedTool, points: activePoints, color: selectedColor, lineWidth: selectedLineWidth, text: text))
         activePoints.removeAll()
         needsDisplay = true
         onHistoryChange?()
@@ -323,17 +338,27 @@ final class AnnotationCanvas: NSView {
         return nil
     }
 
-    private func pushUndoSnapshot() {
-        undoSnapshots.append(marks)
-        if undoSnapshots.count > 100 { undoSnapshots.removeFirst(undoSnapshots.count - 100) }
-        redoSnapshots.removeAll()
-    }
-
     private func markBounds(_ mark: AnnotationMark) -> CGRect {
         guard let first = mark.points.first else { return .zero }
         return mark.points.dropFirst().reduce(CGRect(x: first.x, y: first.y, width: 0, height: 0)) { partial, point in
             partial.union(CGRect(x: point.x, y: point.y, width: 1, height: 1))
         }
+    }
+
+    private func renderingBounds(_ mark: AnnotationMark) -> CGRect {
+        if mark.text?.hasPrefix("⟲WATERMARK⟲") == true { return bounds }
+        guard let first = mark.points.first else { return .zero }
+        if mark.tool == .text || mark.tool == .number {
+            return CGRect(
+                origin: first,
+                size: CGSize(
+                    width: max(70, CGFloat(mark.text?.count ?? 1) * max(10, mark.lineWidth * 3)),
+                    height: max(28, mark.lineWidth * 6)
+                )
+            ).insetBy(dx: -8, dy: -8)
+        }
+        let padding = max(12, mark.tool == .highlighter ? mark.lineWidth * 4 : mark.lineWidth * 3)
+        return markBounds(mark).insetBy(dx: -padding, dy: -padding)
     }
 
     private func drawSelection(for mark: AnnotationMark) {
@@ -422,7 +447,7 @@ final class AnnotationCanvas: NSView {
         guard let bitmap = sourceBitmap, !mark.points.isEmpty else { return }
         let block = max(10, Int(mark.lineWidth * 3))
         let radius = CGFloat(block * 2)
-        var painted = Set<String>()
+        var painted = Set<MosaicGridKey>()
         for index in mark.points.indices {
             let start = index == 0 ? mark.points[index] : mark.points[index - 1]
             let end = mark.points[index]
@@ -439,7 +464,7 @@ final class AnnotationCanvas: NSView {
                     for gridX in minGridX...maxGridX {
                         let center = CGPoint(x: CGFloat(gridX * block + block / 2), y: CGFloat(gridY * block + block / 2))
                         guard hypot(center.x - point.x, center.y - point.y) <= radius else { continue }
-                        let key = "\(gridX):\(gridY)"
+                        let key = MosaicGridKey(x: gridX, y: gridY)
                         guard painted.insert(key).inserted else { continue }
                         let px = min(max(0, Int(center.x / max(1, bounds.width) * CGFloat(bitmap.pixelsWide))), bitmap.pixelsWide - 1)
                         let py = min(max(0, bitmap.pixelsHigh - 1 - Int(center.y / max(1, bounds.height) * CGFloat(bitmap.pixelsHigh))), bitmap.pixelsHigh - 1)

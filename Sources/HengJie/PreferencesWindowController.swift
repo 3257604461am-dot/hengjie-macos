@@ -204,8 +204,8 @@ final class PreferencesWindowController: NSWindowController {
     }
 
     private func aboutView() -> NSView {
-        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.9.0"
-        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "14"
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.10.0"
+        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "15"
         return vertical([label("横截 \(version) (\(build))"), secondary("原生 macOS 截图工具 · MIT License\nApple Silicon · macOS 14 或更高版本")])
     }
 
