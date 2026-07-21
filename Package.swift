@@ -6,8 +6,13 @@ let package = Package(
     platforms: [.macOS(.v14)],
     products: [
         .library(name: "HengJieCore", targets: ["HengJieCore"]),
+        .library(name: "HengJieCapture", targets: ["HengJieCapture"]),
+        .library(name: "HengJieAnnotation", targets: ["HengJieAnnotation"]),
+        .library(name: "HengJieHistory", targets: ["HengJieHistory"]),
+        .library(name: "HengJieMedia", targets: ["HengJieMedia"]),
         .executable(name: "HengJie", targets: ["HengJie"]),
-        .executable(name: "HengJieCoreChecks", targets: ["HengJieCoreChecks"])
+        .executable(name: "HengJieCoreChecks", targets: ["HengJieCoreChecks"]),
+        .executable(name: "HengJieArchitectureChecks", targets: ["HengJieArchitectureChecks"])
     ],
     targets: [
         .target(
@@ -19,9 +24,39 @@ let package = Package(
                 .linkedFramework("NaturalLanguage")
             ]
         ),
+        .target(
+            name: "HengJieCapture",
+            dependencies: ["HengJieCore"],
+            linkerSettings: [
+                .linkedFramework("AppKit"),
+                .linkedFramework("CoreImage"),
+                .linkedFramework("CoreMedia"),
+                .linkedFramework("ScreenCaptureKit")
+            ]
+        ),
+        .target(
+            name: "HengJieAnnotation",
+            linkerSettings: [.linkedFramework("AppKit")]
+        ),
+        .target(
+            name: "HengJieHistory",
+            linkerSettings: [.linkedLibrary("sqlite3")]
+        ),
+        .target(
+            name: "HengJieMedia",
+            dependencies: ["HengJieCore"],
+            linkerSettings: [
+                .linkedFramework("AppKit"),
+                .linkedFramework("ImageIO"),
+                .linkedFramework("SwiftUI"),
+                .linkedFramework("Translation"),
+                .linkedFramework("UniformTypeIdentifiers"),
+                .linkedFramework("Vision")
+            ]
+        ),
         .executableTarget(
             name: "HengJie",
-            dependencies: ["HengJieCore"],
+            dependencies: ["HengJieCore", "HengJieCapture", "HengJieAnnotation", "HengJieHistory", "HengJieMedia"],
             linkerSettings: [
                 .linkedFramework("AppKit"),
                 .linkedFramework("ScreenCaptureKit"),
@@ -37,7 +72,12 @@ let package = Package(
                 .linkedFramework("Carbon")
             ]
         ),
-        .executableTarget(name: "HengJieCoreChecks", dependencies: ["HengJieCore"])
+        .executableTarget(name: "HengJieCoreChecks", dependencies: ["HengJieCore"]),
+        .executableTarget(
+            name: "HengJieArchitectureChecks",
+            dependencies: ["HengJieAnnotation", "HengJieCapture", "HengJieHistory"]
+        ),
+        .testTarget(name: "HengJieCoreTests", dependencies: ["HengJieCore"])
     ],
     swiftLanguageModes: [.v5]
 )

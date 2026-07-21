@@ -9,6 +9,7 @@ public final class StitchSession: @unchecked Sendable {
     public private(set) var frameCount = 0
     public private(set) var direction: StitchDirection?
     public private(set) var pixelSize: CGSize = .zero
+    public private(set) var lastCheckpoint: StitchCheckpoint?
 
     private let estimator: OverlapEstimator
     private var lastFrame: CGImage?
@@ -93,6 +94,28 @@ public final class StitchSession: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         consecutiveFailures = 0
+    }
+
+    /// Writes only session metadata. Segment images remain in the existing
+    /// temporary directory and are never copied into diagnostics.
+    @discardableResult
+    public func writeCheckpoint() throws -> StitchCheckpoint {
+        lock.lock()
+        defer { lock.unlock() }
+        let checkpoint = StitchCheckpoint(
+            axis: axis,
+            frameCount: frameCount,
+            direction: direction,
+            pixelSize: pixelSize,
+            segmentNames: segments.map { $0.url.lastPathComponent }
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        let data = try encoder.encode(checkpoint)
+        try data.write(to: directory.appendingPathComponent("checkpoint.json"), options: .atomic)
+        lastCheckpoint = checkpoint
+        return checkpoint
     }
 
     private func append(_ frame: CGImage, using match: OverlapMatch) throws -> OverlapMatch {

@@ -3,7 +3,7 @@ import CoreImage
 import CoreMedia
 import ScreenCaptureKit
 
-actor ScrollFrameSource {
+public actor ScrollFrameSource {
     private let rect: CGRect
     private let snapshotService: ScreenCaptureService
     private var stream: SCStream?
@@ -11,12 +11,12 @@ actor ScrollFrameSource {
     private var fallbackTask: Task<Void, Never>?
     private var continuation: AsyncStream<CGImage>.Continuation?
 
-    init(rect: CGRect, snapshotService: ScreenCaptureService) {
+    public init(rect: CGRect, snapshotService: ScreenCaptureService) {
         self.rect = rect
         self.snapshotService = snapshotService
     }
 
-    func start() async throws -> AsyncStream<CGImage> {
+    public func start() async throws -> AsyncStream<CGImage> {
         var storedContinuation: AsyncStream<CGImage>.Continuation?
         let frames = AsyncStream<CGImage>(bufferingPolicy: .bufferingNewest(4)) { value in
             storedContinuation = value
@@ -72,7 +72,7 @@ actor ScrollFrameSource {
         return frames
     }
 
-    func stop() async {
+    public func stop() async {
         fallbackTask?.cancel()
         fallbackTask = nil
         continuation?.finish()
@@ -87,7 +87,7 @@ actor ScrollFrameSource {
             guard let self else { return }
             while !Task.isCancelled {
                 if let image = try? await snapshotService.capture(globalRect: rect) {
-                    await self.yield(image)
+                    await yield(image)
                 }
                 try? await Task.sleep(for: .milliseconds(120))
             }

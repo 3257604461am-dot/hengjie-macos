@@ -1,5 +1,6 @@
 import AppKit
 import HengJieCore
+import HengJieCapture
 
 @MainActor
 final class ScrollCaptureController: NSWindowController {
@@ -117,8 +118,10 @@ final class ScrollCaptureController: NSWindowController {
                         switch result {
                         case .initial:
                             updateProgress(confidence: nil)
+                            persistCheckpoint()
                         case let .accepted(match):
                             updateProgress(confidence: match.confidence)
+                            persistCheckpoint()
                             if Date().timeIntervalSince(lastMatchLogAt) >= 1 {
                                 lastMatchLogAt = Date()
                                 DiagnosticLogger.shared.log("stitch", "frame_accepted", fields: [
@@ -229,6 +232,14 @@ final class ScrollCaptureController: NSWindowController {
     }
 
     private func updateStatus(_ text: String) { statusLabel.stringValue = text }
+
+    private func persistCheckpoint() {
+        do {
+            _ = try session.writeCheckpoint()
+        } catch {
+            DiagnosticLogger.shared.log("stitch", "checkpoint_write_failed", fields: ["error": error.localizedDescription])
+        }
+    }
     private func pauseFor(_ reason: StitchPauseReason) {
         paused = true
         retryButton.isHidden = false

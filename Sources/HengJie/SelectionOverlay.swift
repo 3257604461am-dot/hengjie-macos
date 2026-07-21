@@ -56,6 +56,12 @@ final class SelectionOverlayController: NSWindowController {
         }
     }
 
+    /// Dismisses a superseded selection without invoking its completion block.
+    /// A newer capture session owns the coordinator state at that point.
+    func dismiss() {
+        window?.orderOut(nil)
+    }
+
     private func finish(_ rect: CGRect?) {
         window?.orderOut(nil)
         completion(rect)

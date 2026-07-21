@@ -1,20 +1,21 @@
 import AppKit
+import HengJieCore
 import ScreenCaptureKit
 
 @MainActor
-final class ScreenCaptureService {
+public final class ScreenCaptureService {
     private let contentProvider: CaptureContentProvider
 
-    init(contentProvider: CaptureContentProvider? = nil) {
+    public init(contentProvider: CaptureContentProvider? = nil) {
         self.contentProvider = contentProvider ?? .shared
     }
 
-    enum CaptureError: LocalizedError {
+    public enum CaptureError: LocalizedError {
         case noDisplay
         case permissionDenied
         case captureFailed
 
-        var errorDescription: String? {
+        public var errorDescription: String? {
             switch self {
             case .noDisplay: "选区不在可用显示器中。"
             case .permissionDenied: "需要授予屏幕录制权限。"
@@ -23,7 +24,7 @@ final class ScreenCaptureService {
         }
     }
 
-    func capture(globalRect: CGRect) async throws -> CGImage {
+    public func capture(globalRect: CGRect) async throws -> CGImage {
         let trace = PerformanceTrace.begin("ScreenCapture")
         defer { PerformanceTrace.end("ScreenCapture", trace) }
         guard CGPreflightScreenCaptureAccess() else { throw CaptureError.permissionDenied }
@@ -38,8 +39,7 @@ final class ScreenCaptureService {
     }
 
     private func capture(globalRect: CGRect, content: SCShareableContent) async throws -> CGImage {
-        let screens = NSScreen.screens
-        let pieces = screens.compactMap { screen -> (NSScreen, CGRect)? in
+        let pieces = NSScreen.screens.compactMap { screen -> (NSScreen, CGRect)? in
             let intersection = screen.frame.intersection(globalRect)
             return intersection.isNull || intersection.isEmpty ? nil : (screen, intersection)
         }

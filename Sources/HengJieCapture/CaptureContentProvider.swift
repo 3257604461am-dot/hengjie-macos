@@ -2,18 +2,19 @@ import AppKit
 import ScreenCaptureKit
 
 /// Coalesces simultaneous ScreenCaptureKit discovery requests and briefly caches
-/// the result. The cache is intentionally short lived so window/display changes
-/// are reflected without making every screenshot rediscover the whole desktop.
+/// the result so consecutive captures do not rediscover the entire desktop.
 @MainActor
-final class CaptureContentProvider {
-    static let shared = CaptureContentProvider()
+public final class CaptureContentProvider {
+    public static let shared = CaptureContentProvider()
 
     private var cachedContent: SCShareableContent?
     private var cachedAt = Date.distantPast
     private var inFlight: Task<SCShareableContent, Error>?
     private let lifetime: TimeInterval = 1
 
-    func content(forceRefresh: Bool = false) async throws -> SCShareableContent {
+    public init() {}
+
+    public func content(forceRefresh: Bool = false) async throws -> SCShareableContent {
         if !forceRefresh, let cachedContent, Date().timeIntervalSince(cachedAt) < lifetime {
             return cachedContent
         }
@@ -35,7 +36,7 @@ final class CaptureContentProvider {
         }
     }
 
-    func invalidate() {
+    public func invalidate() {
         cachedContent = nil
         cachedAt = .distantPast
     }

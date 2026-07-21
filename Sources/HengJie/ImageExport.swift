@@ -1,4 +1,5 @@
 import AppKit
+import HengJieCore
 import ImageIO
 import UniformTypeIdentifiers
 

@@ -1,47 +1,6 @@
 import AppKit
-
-enum AnnotationTool: String, CaseIterable {
-    case select, pen, line, arrow, rectangle, ellipse, highlighter, text, number, mosaic
-
-    var title: String {
-        switch self {
-        case .select: "选择"
-        case .pen: "画笔"
-        case .line: "直线"
-        case .arrow: "箭头"
-        case .rectangle: "矩形"
-        case .ellipse: "椭圆"
-        case .highlighter: "高亮"
-        case .text: "文字"
-        case .number: "序号"
-        case .mosaic: "马赛克"
-        }
-    }
-}
-
-struct AnnotationMark {
-    var tool: AnnotationTool
-    var points: [CGPoint]
-    var color: NSColor
-    var lineWidth: CGFloat
-    var text: String?
-}
-
-struct AnnotationPointRecord: Codable, Hashable, Sendable {
-    var x: Double
-    var y: Double
-}
-
-struct AnnotationMarkRecord: Codable, Hashable, Sendable {
-    var tool: String
-    var points: [AnnotationPointRecord]
-    var red: Double
-    var green: Double
-    var blue: Double
-    var alpha: Double
-    var relativeLineWidth: Double
-    var text: String?
-}
+import HengJieAnnotation
+import HengJieCore
 
 private struct MosaicGridKey: Hashable {
     let x: Int
@@ -223,7 +182,7 @@ final class AnnotationCanvas: NSView {
         return marks.map { mark in
             let color = mark.color.usingColorSpace(.deviceRGB) ?? mark.color
             return AnnotationMarkRecord(
-                tool: mark.tool.rawValue,
+                id: mark.id, tool: mark.tool.rawValue,
                 points: mark.points.map { .init(x: Double($0.x / width), y: Double($0.y / height)) },
                 red: Double(color.redComponent), green: Double(color.greenComponent), blue: Double(color.blueComponent), alpha: Double(color.alphaComponent),
                 relativeLineWidth: Double(mark.lineWidth / dimension), text: mark.text
@@ -238,7 +197,7 @@ final class AnnotationCanvas: NSView {
         let restored: [AnnotationMark] = records.compactMap { record -> AnnotationMark? in
             guard let tool = AnnotationTool(rawValue: record.tool), tool != .select else { return nil }
             return AnnotationMark(
-                tool: tool,
+                id: record.id ?? UUID(), tool: tool,
                 points: record.points.map { CGPoint(x: $0.x * width, y: $0.y * height) },
                 color: NSColor(deviceRed: record.red, green: record.green, blue: record.blue, alpha: record.alpha),
                 lineWidth: max(1, record.relativeLineWidth * dimension),

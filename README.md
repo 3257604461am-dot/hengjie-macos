@@ -1,5 +1,7 @@
 # 横截
 
+当前版本：**0.11.0（构建 16）**
+
 横截是一款原生 macOS 菜单栏工具，支持普通截图、上下与左右滚动长截图、可编辑截图草稿、钉住区域、提取文字、选区 GIF 录制和本地剪贴板历史。图片、OCR、翻译、GIF 编码和历史数据均在本机处理，不使用横截网络服务。
 
 ## 功能概览
@@ -16,6 +18,7 @@
 - 自定义菜单栏功能面板、分类设置页、快捷键录制和登录时启动。
 - 本地滚动诊断日志与问题诊断 ZIP 导出，不包含用户截图或剪贴板正文。
 - 0.10.0 优化框选、标注、截图打开和历史加载流畅度，并降低长截图、剪贴板监听和日志写入的后台占用。
+- 0.11.0 集中提升长截图可恢复性、历史存储可靠性、标注会话安全和发布诊断能力；不降低截图质量。
 
 ## 0.10.0 性能优化
 
@@ -26,6 +29,14 @@
 - 图片保存直接使用 ImageIO 编码 `CGImage`，不再经过 TIFF 中间格式；历史图片也在后台解码。
 - 剪贴板监听在活跃时保持 250ms 响应，空闲后自动降至 750ms，并在系统睡眠或功能关闭时停止。
 - 动画遵循 macOS“减少动态效果”设置；所有优化保持原始截图、草稿和导出结果无损。
+
+## 0.11.0 可靠性与发布基础
+
+- 长截图会记录不含像素的版本化检查点，并提供可注入的帧回放入口；匹配置信度不足时暂停，避免输出错误长图。
+- 捕获会话使用唯一令牌隔离异步回调，旧会话不会覆盖新编辑器；标注工程使用稳定图层 ID 和差异式撤销记录。
+- 剪贴板历史与最近截图索引迁移到 SQLite WAL，旧版 JSON 会保留迁移备份，载荷和标注工程仍独立存储。
+- 工程拆分为 Core、Capture、Annotation、History、Media 和 App 六个边界；ScreenCaptureKit、标注模型、SQLite 及 OCR/GIF 编码不再全部堆在应用目标内。
+- 默认发布包仍是轻量 Apple Silicon ad-hoc 包；正式构建脚本预留 Developer ID、Hardened Runtime、公证和 Sparkle 更新接口。
 
 ## 系统要求
 
@@ -93,14 +104,17 @@ tccutil reset ScreenCapture com.wonderlab.hengjie
 
 ## 本地构建
 
-当前工程只依赖 macOS Command Line Tools：
+构建应用和命令行质量门禁只依赖 macOS Command Line Tools：
 
 ```sh
 swift run HengJieCoreChecks
+swift run HengJieArchitectureChecks
 ./scripts/build-app.sh
 ```
 
-生成的应用和压缩包位于 `outputs/`。
+完整 XCTest 需要 Xcode，在本机或 GitHub Actions 中执行 `swift test`。生成的应用和压缩包位于 `outputs/`。
+
+默认构建为 Apple Silicon ad-hoc 包。正式签名构建可设置 `SIGNING_MODE=notarized`、`DEVELOPER_ID_APPLICATION` 和 `NOTARY_PROFILE`；没有 Apple Developer 凭据时不会尝试公证。Sparkle 更新仅在正式签名构建中启用，ad-hoc 包保持轻量并关闭自动更新。
 
 ## 隐私与权限
 
@@ -133,7 +147,7 @@ swift run HengJieCoreChecks
 - 自动滚动依赖目标控件正确响应系统滚轮事件；特殊控件请切换为手动滚动。
 - 横向与纵向拼接优先适配浏览器、Excel、WPS 和飞书表格；纯重复纹理、低纹理或持续动画仍可能触发安全暂停。
 - 首版 GIF 只录制固定屏幕区域，不跟随窗口，不提供暂停、逐帧编辑、裁剪、标注、变速、音频或 MP4 导出。
-- 当前为 Apple Silicon 个人版本，不包含云同步、跨设备历史、Developer ID 公证和自动更新。
+- 当前公开 ZIP 为 Apple Silicon 个人 ad-hoc 版本；正式签名、公证和 Sparkle 更新接口已预留，但需要发布者自己的 Apple Developer 凭据。
 - macOS 14 仅支持文字提取、编辑和复制，不支持系统翻译；翻译按钮会显示版本要求。
 - 苹果系统语言包被拒绝下载、网络不可用或系统翻译服务异常时无法完成翻译；原文和已有译文会保留，可恢复网络后重试。
 - 横截只能记录应用运行且历史功能已启用期间的剪贴板变化；极短时间内连续覆盖剪贴板时，只能保存监听时实际可见的最后一项。

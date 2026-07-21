@@ -1,5 +1,7 @@
 import AppKit
 import HengJieCore
+import HengJieCapture
+import HengJieMedia
 
 @main
 struct HengJieApp {
@@ -19,6 +21,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let coordinator = CaptureCoordinator()
     private let historyService = ClipboardHistoryService()
     private let screenshotHistoryService = ScreenshotHistoryService.shared
+    private let updateService = UpdateServiceFactory.make()
     private lazy var historyController = ClipboardHistoryWindowController(service: historyService) { [weak self] image in
         self?.coordinator.editClipboardImage(image)
     }
@@ -56,7 +59,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NotificationCenter.default.addObserver(
             self, selector: #selector(screenParametersChanged), name: NSApplication.didChangeScreenParametersNotification, object: nil
         )
-        DiagnosticLogger.shared.log("lifecycle", "application_ready")
+        DiagnosticLogger.shared.log("lifecycle", "application_ready", fields: ["automaticUpdates": updateService.isAvailable ? "enabled" : "disabled"])
         hotKeyRegistry.install(name: "capture", id: 1) { [weak self] in self?.standardCapture() }
         hotKeyRegistry.install(name: "pin", id: 2) { [weak self] in self?.pinRegion() }
         hotKeyRegistry.install(name: "text", id: 3) { [weak self] in self?.extractText() }

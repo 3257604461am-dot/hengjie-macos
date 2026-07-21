@@ -227,6 +227,25 @@ func runChecks() throws {
         try expect(ScreenshotHistoryRetentionRules.exceedsCapacity(itemCount: 101, totalBytes: 0), "截图历史 100 条限制未生效")
         try expect(ScreenshotHistoryRetentionRules.exceedsCapacity(itemCount: 1, totalBytes: ScreenshotHistoryRetentionRules.maximumTotalBytes + 1), "截图历史 2GB 限制未生效")
     }
+    do {
+        let source = makePattern(width: 900, height: 160, seed: 113)
+        let frames = [
+            source.cropping(to: CGRect(x: 0, y: 0, width: 360, height: 160))!,
+            source.cropping(to: CGRect(x: 180, y: 0, width: 360, height: 160))!,
+            source.cropping(to: CGRect(x: 360, y: 0, width: 360, height: 160))!
+        ]
+        let replay = try StitchReplayRunner(axis: .horizontal).run(frames)
+        try expect(replay.first == .initial, "回放首帧状态错误")
+        try expect(replay.dropFirst().contains(where: { if case .accepted = $0 { true } else { false } }), "回放未接受可靠帧")
+    }
+    do {
+        let session = try StitchSession(axis: .vertical)
+        try session.append(makePattern(width: 120, height: 180, seed: 29))
+        let checkpoint = try session.writeCheckpoint()
+        try expect(checkpoint.version == StitchCheckpoint.currentVersion, "拼接检查点版本错误")
+        try expect(checkpoint.pixelWidth == 120 && checkpoint.pixelHeight == 180, "拼接检查点尺寸错误")
+        try expect(checkpoint.segmentNames.count == 1, "拼接检查点不应包含像素载荷")
+    }
 }
 
 func overlay(frozen: CGImage, on image: CGImage) -> CGImage {
