@@ -1,4 +1,5 @@
 import AppKit
+import HengJieAnnotation
 import HengJieCore
 
 @MainActor

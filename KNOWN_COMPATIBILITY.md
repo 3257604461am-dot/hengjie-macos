@@ -66,3 +66,9 @@
 - 验证普通截图在原选区编辑并由“完成”直接写入剪贴板；长图首次打开时完整居中并可适屏、缩放和恢复 100%。
 - 用 Instruments 的 Allocations 与 Time Profiler 检查长图采集；完成或取消后确认临时目录被释放。
 - 验证诊断日志 7 天/20MB 轮转、异常会话标记、崩溃报告收集和 ZIP 导出，确认不包含截图、OCR、GIF、剪贴板载荷或快捷键配置。
+## 0.11.0
+
+- 继续支持 macOS 14+ 和 Apple Silicon；公开 ZIP 仍为 ad-hoc 签名，未经过 Apple 公证。
+- 长截图新增可注入回放、检查点和更细的匹配诊断；低置信度仍会暂停，不会强行拼接。
+- 历史服务保留旧 JSON 数据迁移路径；SQLite 元数据迁移失败时保留原文件，不删除原有载荷。
+- 正式签名构建可使用 Hardened Runtime、Developer ID 和 `notarytool`；未配置凭据时自动回退到 ad-hoc。

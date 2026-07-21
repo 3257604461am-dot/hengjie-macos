@@ -1,0 +1,32 @@
+name: Build release artifact
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: macos-26
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v5
+      - name: Verify
+        run: |
+          swift test
+          swift run HengJieCoreChecks
+          swift run HengJieArchitectureChecks
+          swift build -c release --product HengJie
+      - name: Build ad-hoc artifact
+        run: ./scripts/build-app.sh
+      - name: Verify ZIP and checksum
+        run: |
+          unzip -t outputs/横截-0.11.0-arm64.zip
+          shasum -a 256 outputs/横截-0.11.0-arm64.zip | tee outputs/横截-0.11.0-arm64.zip.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: HengJie-0.11.0-arm64
+          path: |
+            outputs/横截-0.11.0-arm64.zip
+            outputs/横截-0.11.0-arm64.zip.sha256

@@ -1,5 +1,6 @@
 import AppKit
 import HengJieCore
+import HengJieMedia
 import SwiftUI
 
 @MainActor

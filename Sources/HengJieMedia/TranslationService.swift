@@ -4,13 +4,19 @@ import HengJieCore
 import SwiftUI
 import Translation
 
-struct TranslationOutput: Sendable {
-    let sourceLanguage: TextLanguage
-    let targetLanguage: TextLanguage
-    let translatedText: String
+public struct TranslationOutput: Sendable {
+    public let sourceLanguage: TextLanguage
+    public let targetLanguage: TextLanguage
+    public let translatedText: String
+
+    public init(sourceLanguage: TextLanguage, targetLanguage: TextLanguage, translatedText: String) {
+        self.sourceLanguage = sourceLanguage
+        self.targetLanguage = targetLanguage
+        self.translatedText = translatedText
+    }
 }
 
-enum TranslationProgress: Sendable {
+public enum TranslationProgress: Sendable {
     case checkingAvailability
     case preparingLanguages
     case translating
@@ -18,7 +24,7 @@ enum TranslationProgress: Sendable {
 
 @available(macOS 15.0, *)
 @MainActor
-final class TranslationService: ObservableObject {
+public final class TranslationService: ObservableObject {
     @Published fileprivate var configuration: TranslationSession.Configuration?
     fileprivate var pendingText = ""
     private var pendingSource: TextLanguage?
@@ -30,7 +36,9 @@ final class TranslationService: ObservableObject {
     private var continuation: CheckedContinuation<TranslationOutput, Error>?
     private var generation = 0
 
-    func translate(
+    public init() {}
+
+    public func translate(
         _ text: String,
         from source: TextLanguage,
         to target: TextLanguage,
@@ -65,7 +73,7 @@ final class TranslationService: ObservableObject {
         }
     }
 
-    func cancel() {
+    public func cancel() {
         generation += 1
         continuation?.resume(throwing: CancellationError())
         continuation = nil
@@ -104,10 +112,14 @@ final class TranslationService: ObservableObject {
 }
 
 @available(macOS 15.0, *)
-struct TranslationSessionHost: View {
+public struct TranslationSessionHost: View {
     @ObservedObject var service: TranslationService
 
-    var body: some View {
+    public init(service: TranslationService) {
+        self.service = service
+    }
+
+    public var body: some View {
         Color.clear
             .frame(width: 1, height: 1)
             .translationTask(service.configuration) { session in
@@ -116,7 +128,7 @@ struct TranslationSessionHost: View {
     }
 }
 
-enum TranslationServiceError: LocalizedError {
+public enum TranslationServiceError: LocalizedError {
     case nothingToTranslate
     case sameLanguage
     case unsupportedSource
@@ -139,7 +151,7 @@ enum TranslationServiceError: LocalizedError {
         return .systemFailure(error.localizedDescription)
     }
 
-    var errorDescription: String? {
+    public var errorDescription: String? {
         switch self {
         case .nothingToTranslate: "没有可翻译的文字。"
         case .sameLanguage: "原文语言和目标语言相同，请选择其他语言。"

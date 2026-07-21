@@ -2,77 +2,8 @@ import AppKit
 import CoreImage
 import CoreMedia
 import HengJieCore
-import ImageIO
+import HengJieMedia
 import ScreenCaptureKit
-import UniformTypeIdentifiers
-
-struct GIFRecordingResult {
-    let url: URL
-    let pixelSize: CGSize
-    let framesPerSecond: Int
-    let duration: TimeInterval
-    let frameCount: Int
-    let fileSize: Int64
-}
-
-enum GIFRecordingError: LocalizedError {
-    case selectionCrossesDisplays
-    case displayUnavailable
-    case cannotCreateEncoder
-    case encodingFailed
-    case noFrames
-    case maximumFileSizeReached
-
-    var errorDescription: String? {
-        switch self {
-        case .selectionCrossesDisplays: "GIF 录制区域必须位于同一个显示器内，请重新框选。"
-        case .displayUnavailable: "所选显示器已不可用。"
-        case .cannotCreateEncoder: "无法创建 GIF 编码器。"
-        case .encodingFailed: "GIF 编码失败，已尽可能保留完成部分。"
-        case .noFrames: "录制期间没有捕获到有效画面。"
-        case .maximumFileSizeReached: "GIF 已达到 1GB 安全上限并自动停止。"
-        }
-    }
-}
-
-final class GIFStreamEncoder {
-    let url: URL
-    private let destination: CGImageDestination
-    private(set) var frameCount = 0
-
-    init(url: URL, maximumFrameCount: Int) throws {
-        self.url = url
-        guard let destination = CGImageDestinationCreateWithURL(
-            url as CFURL, UTType.gif.identifier as CFString, max(1, maximumFrameCount), nil
-        ) else { throw GIFRecordingError.cannotCreateEncoder }
-        self.destination = destination
-        CGImageDestinationSetProperties(destination, [
-            kCGImagePropertyGIFDictionary: [kCGImagePropertyGIFLoopCount: 0]
-        ] as CFDictionary)
-    }
-
-    func add(_ image: CGImage, delay: TimeInterval) {
-        let safeDelay = max(0.02, delay)
-        CGImageDestinationAddImage(destination, image, [
-            kCGImagePropertyGIFDictionary: [
-                kCGImagePropertyGIFDelayTime: safeDelay,
-                kCGImagePropertyGIFUnclampedDelayTime: safeDelay
-            ]
-        ] as CFDictionary)
-        frameCount += 1
-    }
-
-    func finalize() throws -> Int64 {
-        guard frameCount > 0 else { throw GIFRecordingError.noFrames }
-        guard CGImageDestinationFinalize(destination) else { throw GIFRecordingError.encodingFailed }
-        return Self.fileSize(at: url)
-    }
-
-    static func fileSize(at url: URL) -> Int64 {
-        let value = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize
-        return Int64(value ?? 0)
-    }
-}
 
 final class GIFRecordingSession: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sendable {
     typealias Completion = (Result<GIFRecordingResult, Error>) -> Void
@@ -277,27 +208,5 @@ final class GIFRecordingSession: NSObject, SCStreamOutput, SCStreamDelegate, @un
 
     private func throwIfStopRequested() throws {
         if isStopRequested { throw CancellationError() }
-    }
-}
-
-struct GIFPartialResultError: LocalizedError {
-    let error: Error
-    let result: GIFRecordingResult
-    var errorDescription: String? { error.localizedDescription }
-}
-
-enum GIFTemporaryFiles {
-    static var directory: URL {
-        FileManager.default.temporaryDirectory.appendingPathComponent("com.wonderlab.hengjie/gif", isDirectory: true)
-    }
-
-    static func newURL() -> URL {
-        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        return directory.appendingPathComponent(UUID().uuidString).appendingPathExtension("gif")
-    }
-
-    static func cleanupStaleFiles() {
-        guard let urls = try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil) else { return }
-        for url in urls { try? FileManager.default.removeItem(at: url) }
     }
 }

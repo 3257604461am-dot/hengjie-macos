@@ -1,4 +1,5 @@
 import AppKit
+import HengJieMedia
 import HengJieCore
 import UniformTypeIdentifiers
 

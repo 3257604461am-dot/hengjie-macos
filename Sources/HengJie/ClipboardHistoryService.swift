@@ -1,6 +1,7 @@
 import AppKit
 import CryptoKit
 import HengJieCore
+import HengJieHistory
 import ImageIO
 import UniformTypeIdentifiers
 
@@ -224,38 +225,76 @@ private actor ClipboardHistoryStore {
     private let rootURL: URL
     private let payloadsURL: URL
     private let indexURL: URL
+    private let encoder: JSONEncoder
+    private let decoder: JSONDecoder
+    private let sqlite: SQLiteHistoryIndex?
 
     init(rootURL: URL) {
         self.rootURL = rootURL
         payloadsURL = rootURL.appendingPathComponent("Payloads", isDirectory: true)
         indexURL = rootURL.appendingPathComponent("index.json")
+        encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        do {
+            sqlite = try SQLiteHistoryIndex(url: rootURL.appendingPathComponent("index.sqlite"))
+        } catch {
+            sqlite = nil
+            DiagnosticLogger.shared.log("history", "sqlite_unavailable", fields: ["kind": "clipboard", "error": error.localizedDescription])
+        }
     }
 
-    func load() -> [ClipboardHistoryItem] {
+    func load() async -> [ClipboardHistoryItem] {
         try? FileManager.default.createDirectory(at: payloadsURL, withIntermediateDirectories: true)
-        guard let data = try? Data(contentsOf: indexURL) else {
-            removeOrphans(referencedIDs: [])
-            return []
+        if let sqlite {
+            do {
+                let storedRows = try await sqlite.load()
+                if !storedRows.isEmpty {
+                    let values = storedRows.compactMap { try? decoder.decode(ClipboardHistoryItem.self, from: $0.metadata) }
+                    guard values.count == storedRows.count else { throw SQLiteHistoryIndexError.invalidMetadata }
+                    if !values.isEmpty {
+                        let sorted = values.sorted { $0.lastUsedAt > $1.lastUsedAt }
+                        removeOrphans(referencedIDs: Set(sorted.map(\.id)))
+                        return sorted
+                    }
+                }
+                if let data = try? Data(contentsOf: indexURL),
+                   let legacy = try? decoder.decode([ClipboardHistoryItem].self, from: data) {
+                    let sorted = legacy.sorted { $0.lastUsedAt > $1.lastUsedAt }
+                    try await sqlite.replace(makeRows(for: sorted))
+                    let backup = indexURL.deletingPathExtension().appendingPathExtension("migrated-\(Int(Date().timeIntervalSince1970)).json")
+                    try? FileManager.default.moveItem(at: indexURL, to: backup)
+                    removeOrphans(referencedIDs: Set(sorted.map(\.id)))
+                    DiagnosticLogger.shared.log("history", "clipboard_index_migrated", fields: ["count": "\(sorted.count)"])
+                    return sorted
+                }
+            } catch {
+                DiagnosticLogger.shared.log("history", "clipboard_sqlite_fallback", fields: ["error": error.localizedDescription])
+            }
         }
+        guard let data = try? Data(contentsOf: indexURL) else { return [] }
         do {
-            let decoder = JSONDecoder()
-            decoder.dateDecodingStrategy = .iso8601
             let items = try decoder.decode([ClipboardHistoryItem].self, from: data).sorted { $0.lastUsedAt > $1.lastUsedAt }
             removeOrphans(referencedIDs: Set(items.map(\.id)))
             return items
         } catch {
-            try? FileManager.default.removeItem(at: indexURL)
-            try? FileManager.default.removeItem(at: payloadsURL)
-            try? FileManager.default.createDirectory(at: payloadsURL, withIntermediateDirectories: true)
+            DiagnosticLogger.shared.log("history", "clipboard_legacy_index_invalid", fields: ["error": error.localizedDescription])
             return []
         }
     }
 
-    func saveIndex(_ items: [ClipboardHistoryItem]) throws {
+    func saveIndex(_ items: [ClipboardHistoryItem]) async throws {
         try FileManager.default.createDirectory(at: rootURL, withIntermediateDirectories: true)
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        encoder.dateEncodingStrategy = .iso8601
+        if let sqlite {
+            do {
+                try await sqlite.replace(makeRows(for: items))
+                return
+            } catch {
+                DiagnosticLogger.shared.log("history", "clipboard_sqlite_write_failed", fields: ["error": error.localizedDescription])
+            }
+        }
         try encoder.encode(items).write(to: indexURL, options: .atomic)
     }
 
@@ -309,13 +348,37 @@ private actor ClipboardHistoryStore {
         ids.forEach { try? FileManager.default.removeItem(at: payloadDirectory(for: $0)) }
     }
 
-    func clear() {
-        try? FileManager.default.removeItem(at: payloadsURL)
-        try? FileManager.default.createDirectory(at: payloadsURL, withIntermediateDirectories: true)
+    func clear() async {
+        do {
+            try FileManager.default.removeItem(at: payloadsURL)
+            try FileManager.default.createDirectory(at: payloadsURL, withIntermediateDirectories: true)
+        } catch {
+            DiagnosticLogger.shared.log("history", "clipboard_payload_clear_failed", fields: ["error": error.localizedDescription])
+        }
+        try? FileManager.default.removeItem(at: indexURL)
+        if let sqlite {
+            do { try await sqlite.deleteAll() }
+            catch { DiagnosticLogger.shared.log("history", "clipboard_sqlite_clear_failed", fields: ["error": error.localizedDescription]) }
+        }
     }
 
     private func payloadDirectory(for id: UUID) -> URL {
         payloadsURL.appendingPathComponent(id.uuidString, isDirectory: true)
+    }
+
+    private func makeRows(for items: [ClipboardHistoryItem]) -> [SQLiteHistoryRow] {
+        items.compactMap { item in
+            guard let metadata = try? encoder.encode(item) else { return nil }
+            return SQLiteHistoryRow(
+                id: item.id.uuidString,
+                sortValue: item.lastUsedAt.timeIntervalSince1970,
+                kind: item.kind.rawValue,
+                isPinned: item.isPinned,
+                byteCount: item.byteCount,
+                searchText: item.searchText ?? item.previewText,
+                metadata: metadata
+            )
+        }
     }
 
     private func removeOrphans(referencedIDs: Set<UUID>) {

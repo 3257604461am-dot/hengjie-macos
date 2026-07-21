@@ -2,6 +2,8 @@ import AppKit
 import ImageIO
 import UniformTypeIdentifiers
 import HengJieCore
+import HengJieAnnotation
+import HengJieHistory
 
 enum ScreenshotHistoryKind: String, Codable, CaseIterable, Sendable {
     case standard, horizontal, vertical
@@ -64,7 +66,7 @@ struct ScreenshotHistoryItem: Codable, Identifiable, Hashable, Sendable {
 }
 
 struct ScreenshotProject: Codable, Sendable {
-    static let currentVersion = 1
+    static let currentVersion = 2
     var version: Int
     var displayWidth: Double
     var displayHeight: Double
@@ -106,6 +108,7 @@ private actor ScreenshotHistoryStore {
     private let indexURL: URL
     private let encoder: JSONEncoder
     private let decoder: JSONDecoder
+    private let sqlite: SQLiteHistoryIndex?
 
     init(rootURL: URL) {
         self.rootURL = rootURL
@@ -115,10 +118,42 @@ private actor ScreenshotHistoryStore {
         encoder.dateEncodingStrategy = .iso8601
         decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
+        do {
+            sqlite = try SQLiteHistoryIndex(url: rootURL.appendingPathComponent("index.sqlite"))
+        } catch {
+            sqlite = nil
+            DiagnosticLogger.shared.log("history", "sqlite_unavailable", fields: ["kind": "screenshot", "error": error.localizedDescription])
+        }
     }
 
-    func loadIndex() -> [ScreenshotHistoryItem] {
+    func loadIndex() async -> [ScreenshotHistoryItem] {
         try? FileManager.default.createDirectory(at: rootURL, withIntermediateDirectories: true)
+        if let sqlite {
+            do {
+                let storedRows = try await sqlite.load()
+                if !storedRows.isEmpty {
+                    let values = storedRows.compactMap { try? decoder.decode(ScreenshotHistoryItem.self, from: $0.metadata) }
+                    guard values.count == storedRows.count else { throw SQLiteHistoryIndexError.invalidMetadata }
+                    if !values.isEmpty {
+                        let sorted = values.sorted { $0.updatedAt > $1.updatedAt }
+                        removeOrphans(referenced: Set(sorted.map(\.id)))
+                        return sorted
+                    }
+                }
+                if let legacyData = try? Data(contentsOf: indexURL),
+                   let legacy = try? decoder.decode([ScreenshotHistoryItem].self, from: legacyData) {
+                    let sorted = legacy.sorted { $0.updatedAt > $1.updatedAt }
+                    try await sqlite.replace(makeRows(for: sorted))
+                    let backup = indexURL.deletingPathExtension().appendingPathExtension("migrated-\(Int(Date().timeIntervalSince1970)).json")
+                    try? FileManager.default.moveItem(at: indexURL, to: backup)
+                    removeOrphans(referenced: Set(sorted.map(\.id)))
+                    DiagnosticLogger.shared.log("history", "screenshot_index_migrated", fields: ["count": "\(sorted.count)"])
+                    return sorted
+                }
+            } catch {
+                DiagnosticLogger.shared.log("history", "screenshot_sqlite_fallback", fields: ["error": error.localizedDescription])
+            }
+        }
         guard let data = try? Data(contentsOf: indexURL),
               let values = try? decoder.decode([ScreenshotHistoryItem].self, from: data) else {
             let recovered = recoverItems()
@@ -160,8 +195,16 @@ private actor ScreenshotHistoryStore {
         return storedItem
     }
 
-    func saveIndex(_ items: [ScreenshotHistoryItem]) throws {
+    func saveIndex(_ items: [ScreenshotHistoryItem]) async throws {
         try FileManager.default.createDirectory(at: rootURL, withIntermediateDirectories: true)
+        if let sqlite {
+            do {
+                try await sqlite.replace(makeRows(for: items))
+                return
+            } catch {
+                DiagnosticLogger.shared.log("history", "screenshot_sqlite_write_failed", fields: ["error": error.localizedDescription])
+            }
+        }
         try encoder.encode(items).write(to: indexURL, options: .atomic)
     }
 
@@ -191,12 +234,36 @@ private actor ScreenshotHistoryStore {
         for id in ids { try? FileManager.default.removeItem(at: directory(for: id)) }
     }
 
-    func clear() {
-        try? FileManager.default.removeItem(at: rootURL)
-        try? FileManager.default.createDirectory(at: rootURL, withIntermediateDirectories: true)
+    func clear() async {
+        if let urls = try? FileManager.default.contentsOfDirectory(at: rootURL, includingPropertiesForKeys: nil) {
+            for url in urls where UUID(uuidString: url.lastPathComponent) != nil {
+                do { try FileManager.default.removeItem(at: url) }
+                catch { DiagnosticLogger.shared.log("history", "screenshot_payload_remove_failed", fields: ["error": error.localizedDescription]) }
+            }
+        }
+        try? FileManager.default.removeItem(at: indexURL)
+        if let sqlite {
+            do { try await sqlite.deleteAll() }
+            catch { DiagnosticLogger.shared.log("history", "screenshot_sqlite_clear_failed", fields: ["error": error.localizedDescription]) }
+        }
     }
 
     private func directory(for id: UUID) -> URL { rootURL.appendingPathComponent(id.uuidString, isDirectory: true) }
+
+    private func makeRows(for items: [ScreenshotHistoryItem]) -> [SQLiteHistoryRow] {
+        items.compactMap { item in
+            guard let metadata = try? encoder.encode(item) else { return nil }
+            return SQLiteHistoryRow(
+                id: item.id.uuidString,
+                sortValue: item.updatedAt.timeIntervalSince1970,
+                kind: item.kind.rawValue,
+                isPinned: false,
+                byteCount: item.byteCount,
+                searchText: item.kind.rawValue,
+                metadata: metadata
+            )
+        }
+    }
 
     private func byteCount(in directory: URL) -> Int64 {
         guard let urls = try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.fileSizeKey]) else { return 0 }
@@ -207,8 +274,8 @@ private actor ScreenshotHistoryStore {
 
     private func removeOrphans(referenced: Set<UUID>) {
         guard let urls = try? FileManager.default.contentsOfDirectory(at: rootURL, includingPropertiesForKeys: nil) else { return }
-        for url in urls where url.lastPathComponent != "index.json" {
-            if let id = UUID(uuidString: url.lastPathComponent), referenced.contains(id) { continue }
+        for url in urls {
+            guard let id = UUID(uuidString: url.lastPathComponent), !referenced.contains(id) else { continue }
             try? FileManager.default.removeItem(at: url)
         }
     }

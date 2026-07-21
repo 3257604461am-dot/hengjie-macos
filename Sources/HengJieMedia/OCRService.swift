@@ -2,13 +2,18 @@ import AppKit
 import HengJieCore
 @preconcurrency import Vision
 
-struct OCRResult: Sendable {
-    let text: String
-    let detectedLanguage: TextLanguage?
+public struct OCRResult: Sendable {
+    public let text: String
+    public let detectedLanguage: TextLanguage?
+
+    public init(text: String, detectedLanguage: TextLanguage?) {
+        self.text = text
+        self.detectedLanguage = detectedLanguage
+    }
 }
 
-enum OCRService {
-    static func recognize(_ image: CGImage, displaySize: CGSize? = nil) async throws -> OCRResult {
+public enum OCRService {
+    public static func recognize(_ image: CGImage, displaySize: CGSize? = nil) async throws -> OCRResult {
         try Task.checkCancellation()
         let preparedImage = downsampleIfNeeded(image, displaySize: displaySize)
         let text: String = try await withCheckedThrowingContinuation { continuation in
@@ -30,7 +35,7 @@ enum OCRService {
         return OCRResult(text: text, detectedLanguage: TextLanguage.detect(in: text))
     }
 
-    static func recognize(_ image: NSImage) async throws -> OCRResult {
+    public static func recognize(_ image: NSImage) async throws -> OCRResult {
         if let bitmap = image.representations.compactMap({ $0 as? NSBitmapImageRep }).first,
            let cgImage = bitmap.cgImage {
             return try await recognize(cgImage, displaySize: image.size)

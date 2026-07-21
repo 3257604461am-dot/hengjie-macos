@@ -1,10 +1,14 @@
 import AppKit
 import HengJieCore
+import HengJieCapture
+import HengJieAnnotation
+import HengJieMedia
 
 @MainActor
 final class CaptureCoordinator {
     var onGIFRecordingStateChange: ((Bool) -> Void)?
     private let service = ScreenCaptureService()
+    private let sessionRegistry = CaptureSessionRegistry()
     private var selectionController: SelectionOverlayController?
     private var pinSelectionController: SelectionOverlayController?
     private var textSelectionController: SelectionOverlayController?
@@ -25,16 +29,26 @@ final class CaptureCoordinator {
         gifSelectionController != nil || gifConfigurationController != nil || gifControlController != nil || gifSession != nil || gifPreviewController != nil
     }
 
-    init() { GIFTemporaryFiles.cleanupStaleFiles() }
+    init() {
+        GIFTemporaryFiles.cleanupStaleFiles()
+        sessionRegistry.onTransition = { token, state in
+            DiagnosticLogger.shared.log("session", "state_changed", fields: ["id": token.id.uuidString, "state": state.rawValue])
+        }
+    }
 
     func begin(mode: CaptureMode) {
         guard allowCaptureWhileNotRecordingGIF() else { return }
         guard ensureCapturePermission() else { return }
+        selectionController?.dismiss()
+        let token = sessionRegistry.begin(.selecting)
         let selection = SelectionOverlayController { [weak self] rect in
             self?.selectionController = nil
-            guard let rect else { return }
-            if mode == .standard { self?.captureStandard(rect) }
-            else { self?.captureScrolling(rect, mode: mode) }
+            guard let self else { return }
+            guard self.sessionRegistry.isCurrent(token) else { return }
+            guard let rect else { self.sessionRegistry.finish(token, state: .cancelled); return }
+            self.sessionRegistry.transition(.capturing, for: token)
+            if mode == .standard { self.captureStandard(rect, token: token) }
+            else { self.captureScrolling(rect, mode: mode, token: token) }
         }
         selectionController = selection
         selection.begin()
@@ -268,17 +282,22 @@ final class CaptureCoordinator {
         return true
     }
 
-    private func captureStandard(_ rect: CGRect) {
+    private func captureStandard(_ rect: CGRect, token: CaptureSessionToken? = nil) {
         Task {
             do {
                 let image = try await service.capture(globalRect: rect)
+                if let token { guard sessionRegistry.isCurrent(token) else { return } }
                 let historyID = ScreenshotHistoryService.shared.create(image: image, displaySize: rect.size, kind: .standard)
                 let controller = StandardCaptureOverlayController(image: image, globalRect: rect, historyID: historyID) { [weak self] in
-                    self?.standardController = nil
+                    guard let self else { return }
+                    self.standardController = nil
+                    if let token { self.sessionRegistry.finish(token) }
                 }
                 standardController = controller
+                if let token { sessionRegistry.transition(.editing, for: token) }
                 controller.begin()
             } catch {
+                if let token { sessionRegistry.finish(token, state: .failed) }
                 show(error)
             }
         }
@@ -309,32 +328,55 @@ final class CaptureCoordinator {
         }
     }
 
-    private func captureScrolling(_ rect: CGRect, mode: CaptureMode) {
+    private func captureScrolling(_ rect: CGRect, mode: CaptureMode, token: CaptureSessionToken? = nil) {
         let axis: StitchAxis = mode == .horizontal ? .horizontal : .vertical
         do {
             let controller = try ScrollCaptureController(rect: rect, axis: axis, captureService: service) { [weak self] result in
-                self?.scrollController = nil
+                guard let self else { return }
+                guard token.map({ self.sessionRegistry.isCurrent($0) }) ?? true else { return }
+                self.scrollController = nil
                 switch result {
-                case let .success(image): self?.presentEditor(image, kind: mode == .horizontal ? .horizontal : .vertical)
-                case let .failure(error) where error is CancellationError: break
-                case let .failure(error): self?.show(error)
+                case let .success(image):
+                    if let token { self.sessionRegistry.transition(.editing, for: token) }
+                    self.presentEditor(
+                        image,
+                        kind: mode == .horizontal ? .horizontal : .vertical,
+                        sessionToken: token
+                    )
+                case let .failure(error) where error is CancellationError:
+                    if let token { self.sessionRegistry.finish(token, state: .cancelled) }
+                case let .failure(error):
+                    if let token { self.sessionRegistry.finish(token, state: .failed) }
+                    self.show(error)
                 }
             }
             scrollController = controller
             controller.begin()
         } catch {
+            if let token { sessionRegistry.finish(token, state: .failed) }
             show(error)
         }
     }
 
-    private func presentEditor(_ image: CGImage, kind: ScreenshotHistoryKind? = nil) {
+    private func presentEditor(
+        _ image: CGImage,
+        kind: ScreenshotHistoryKind? = nil,
+        sessionToken: CaptureSessionToken? = nil
+    ) {
         Task { [weak self] in
             guard let self else { return }
+            if let sessionToken { guard sessionRegistry.isCurrent(sessionToken) else { return } }
             let displaySize = CGSize(width: image.width, height: image.height)
             let historyID: UUID? = if let kind {
                 ScreenshotHistoryService.shared.create(image: image, displaySize: displaySize, kind: kind)
             } else { nil }
-            presentEditor(image: image, displaySize: displaySize, annotations: [], historyID: historyID)
+            presentEditor(
+                image: image,
+                displaySize: displaySize,
+                annotations: [],
+                historyID: historyID,
+                sessionToken: sessionToken
+            )
         }
     }
 
@@ -352,11 +394,19 @@ final class CaptureCoordinator {
         presentEditor(image: image, displaySize: CGSize(width: image.width, height: image.height), annotations: [], historyID: nil)
     }
 
-    private func presentEditor(image: CGImage, displaySize: CGSize, annotations: [AnnotationMarkRecord], historyID: UUID?) {
+    private func presentEditor(
+        image: CGImage,
+        displaySize: CGSize,
+        annotations: [AnnotationMarkRecord],
+        historyID: UUID?,
+        sessionToken: CaptureSessionToken? = nil
+    ) {
         let controller = AnnotationEditorWindowController(
             image: image, displaySize: displaySize, annotations: annotations, historyID: historyID, presentationMode: .fitToWindow
         ) { [weak self] controller in
-            self?.editorControllers.removeAll { $0 === controller }
+            guard let self else { return }
+            self.editorControllers.removeAll { $0 === controller }
+            if let sessionToken { self.sessionRegistry.finish(sessionToken) }
         }
         editorControllers.append(controller)
         controller.showWindow(nil)
