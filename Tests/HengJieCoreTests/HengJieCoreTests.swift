@@ -36,10 +36,10 @@ final class HengJieCoreTests: XCTestCase {
     }
 
     func testLimitsRejectOversizedReplay() throws {
-        let session = try StitchSession(axis: .horizontal, limits: StitchLimits(maximumAxisLength: 400, maximumPixelCount: 100_000))
-        let source = makePattern(width: 900, height: 100)
-        try session.append(source.cropping(to: CGRect(x: 0, y: 0, width: 300, height: 100))!)
-        XCTAssertThrowsError(try session.append(source.cropping(to: CGRect(x: 200, y: 0, width: 300, height: 100))!)) { error in
+        let session = try StitchSession(axis: .horizontal, limits: StitchLimits(maximumAxisLength: 500, maximumPixelCount: 1_000_000))
+        let source = makePattern(width: 900, height: 160)
+        try session.append(source.cropping(to: CGRect(x: 0, y: 0, width: 360, height: 160))!)
+        XCTAssertThrowsError(try session.append(source.cropping(to: CGRect(x: 180, y: 0, width: 360, height: 160))!)) { error in
             XCTAssertEqual(error as? StitchError, .limitReached)
         }
     }
