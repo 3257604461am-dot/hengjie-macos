@@ -5,21 +5,21 @@
     <key>CFBundleDevelopmentRegion</key>
     <string>zh_CN</string>
     <key>CFBundleDisplayName</key>
-    <string>横截</string>
+    <string>SnapWeave</string>
     <key>CFBundleExecutable</key>
-    <string>HengJie</string>
+    <string>SnapWeave</string>
     <key>CFBundleIdentifier</key>
     <string>com.wonderlab.hengjie</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>
-    <string>横截</string>
+    <string>SnapWeave</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.11.0</string>
+    <string>0.11.1</string>
     <key>CFBundleVersion</key>
-    <string>16</string>
+    <string>17</string>
     <key>LSMinimumSystemVersion</key>
     <string>14.0</string>
     <key>LSUIElement</key>
@@ -27,6 +27,6 @@
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>NSScreenCaptureUsageDescription</key>
-    <string>横截需要读取您选中的屏幕区域以生成截图，图片只在本机处理。</string>
+    <string>SnapWeave 需要读取您选中的屏幕区域以生成截图，图片只在本机处理。</string>
 </dict>
 </plist>

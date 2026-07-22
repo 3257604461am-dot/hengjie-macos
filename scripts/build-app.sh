@@ -3,19 +3,17 @@ set -euo pipefail
 
 ROOT="${0:A:h:h}"
 OUTPUT="$ROOT/outputs"
-APP="$OUTPUT/横截.app"
-ZIP="$OUTPUT/横截-0.11.0-arm64.zip"
+APP="$OUTPUT/SnapWeave.app"
+ZIP="$OUTPUT/SnapWeave-0.11.1-arm64.zip"
 
 cd "$ROOT"
-swift build -c release --product HengJie --arch arm64
+swift build -c release --product SnapWeave --arch arm64
 
-rm -rf "$APP" "$OUTPUT"/*.zip(N)
+rm -rf "$OUTPUT"/*.app(N) "$OUTPUT"/*.zip(N) "$OUTPUT"/*-使用说明.md(N) "$OUTPUT"/*-兼容性清单.md(N)
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-cp "$ROOT/.build/arm64-apple-macosx/release/HengJie" "$APP/Contents/MacOS/HengJie"
+cp "$ROOT/.build/arm64-apple-macosx/release/SnapWeave" "$APP/Contents/MacOS/SnapWeave"
 cp "$ROOT/Resources/Info.plist" "$APP/Contents/Info.plist"
-cp "$ROOT/README.md" "$OUTPUT/横截-使用说明.md"
-cp "$ROOT/KNOWN_COMPATIBILITY.md" "$OUTPUT/横截-兼容性清单.md"
-chmod +x "$APP/Contents/MacOS/HengJie"
+chmod +x "$APP/Contents/MacOS/SnapWeave"
 
 SIGNING_MODE="${SIGNING_MODE:-adhoc}"
 
@@ -35,7 +33,7 @@ fi
 
 if [[ "$SIGNING_MODE" == "notarized" ]]; then
   : "${NOTARY_PROFILE:?notarized 构建需要 NOTARY_PROFILE}"
-  NOTARY_ZIP="$OUTPUT/.横截-notary.zip"
+  NOTARY_ZIP="$OUTPUT/.SnapWeave-notary.zip"
   rm -f "$NOTARY_ZIP"
   ditto -c -k --sequesterRsrc --keepParent "$APP" "$NOTARY_ZIP"
   xcrun notarytool submit "$NOTARY_ZIP" --keychain-profile "$NOTARY_PROFILE" --wait
@@ -45,6 +43,6 @@ fi
 codesign --verify --deep --strict --verbose=2 "$APP"
 ditto -c -k --sequesterRsrc --keepParent "$APP" "$ZIP"
 shasum -a 256 "$ZIP"
+rm -rf "$APP"
 
-echo "已生成：$APP"
 echo "压缩包：$ZIP"

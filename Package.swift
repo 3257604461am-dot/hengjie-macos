@@ -2,21 +2,21 @@
 import PackageDescription
 
 let package = Package(
-    name: "HengJie",
+    name: "SnapWeave",
     platforms: [.macOS(.v14)],
     products: [
-        .library(name: "HengJieCore", targets: ["HengJieCore"]),
-        .library(name: "HengJieCapture", targets: ["HengJieCapture"]),
-        .library(name: "HengJieAnnotation", targets: ["HengJieAnnotation"]),
-        .library(name: "HengJieHistory", targets: ["HengJieHistory"]),
-        .library(name: "HengJieMedia", targets: ["HengJieMedia"]),
-        .executable(name: "HengJie", targets: ["HengJie"]),
-        .executable(name: "HengJieCoreChecks", targets: ["HengJieCoreChecks"]),
-        .executable(name: "HengJieArchitectureChecks", targets: ["HengJieArchitectureChecks"])
+        .library(name: "SnapWeaveCore", targets: ["SnapWeaveCore"]),
+        .library(name: "SnapWeaveCapture", targets: ["SnapWeaveCapture"]),
+        .library(name: "SnapWeaveAnnotation", targets: ["SnapWeaveAnnotation"]),
+        .library(name: "SnapWeaveHistory", targets: ["SnapWeaveHistory"]),
+        .library(name: "SnapWeaveMedia", targets: ["SnapWeaveMedia"]),
+        .executable(name: "SnapWeave", targets: ["SnapWeave"]),
+        .executable(name: "SnapWeaveCoreChecks", targets: ["SnapWeaveCoreChecks"]),
+        .executable(name: "SnapWeaveArchitectureChecks", targets: ["SnapWeaveArchitectureChecks"])
     ],
     targets: [
         .target(
-            name: "HengJieCore",
+            name: "SnapWeaveCore",
             linkerSettings: [
                 .linkedFramework("AppKit"),
                 .linkedFramework("Accelerate"),
@@ -25,8 +25,8 @@ let package = Package(
             ]
         ),
         .target(
-            name: "HengJieCapture",
-            dependencies: ["HengJieCore"],
+            name: "SnapWeaveCapture",
+            dependencies: ["SnapWeaveCore"],
             linkerSettings: [
                 .linkedFramework("AppKit"),
                 .linkedFramework("CoreImage"),
@@ -35,16 +35,16 @@ let package = Package(
             ]
         ),
         .target(
-            name: "HengJieAnnotation",
+            name: "SnapWeaveAnnotation",
             linkerSettings: [.linkedFramework("AppKit")]
         ),
         .target(
-            name: "HengJieHistory",
+            name: "SnapWeaveHistory",
             linkerSettings: [.linkedLibrary("sqlite3")]
         ),
         .target(
-            name: "HengJieMedia",
-            dependencies: ["HengJieCore"],
+            name: "SnapWeaveMedia",
+            dependencies: ["SnapWeaveCore"],
             linkerSettings: [
                 .linkedFramework("AppKit"),
                 .linkedFramework("ImageIO"),
@@ -55,8 +55,8 @@ let package = Package(
             ]
         ),
         .executableTarget(
-            name: "HengJie",
-            dependencies: ["HengJieCore", "HengJieCapture", "HengJieAnnotation", "HengJieHistory", "HengJieMedia"],
+            name: "SnapWeave",
+            dependencies: ["SnapWeaveCore", "SnapWeaveCapture", "SnapWeaveAnnotation", "SnapWeaveHistory", "SnapWeaveMedia"],
             linkerSettings: [
                 .linkedFramework("AppKit"),
                 .linkedFramework("ScreenCaptureKit"),
@@ -72,12 +72,12 @@ let package = Package(
                 .linkedFramework("Carbon")
             ]
         ),
-        .executableTarget(name: "HengJieCoreChecks", dependencies: ["HengJieCore"]),
+        .executableTarget(name: "SnapWeaveCoreChecks", dependencies: ["SnapWeaveCore"]),
         .executableTarget(
-            name: "HengJieArchitectureChecks",
-            dependencies: ["HengJieAnnotation", "HengJieCapture", "HengJieHistory"]
+            name: "SnapWeaveArchitectureChecks",
+            dependencies: ["SnapWeaveAnnotation", "SnapWeaveCapture", "SnapWeaveHistory"]
         ),
-        .testTarget(name: "HengJieCoreTests", dependencies: ["HengJieCore"])
+        .testTarget(name: "SnapWeaveCoreTests", dependencies: ["SnapWeaveCore"])
     ],
     swiftLanguageModes: [.v5]
 )
