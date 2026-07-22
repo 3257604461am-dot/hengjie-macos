@@ -18,16 +18,16 @@ jobs:
         uses: actions/checkout@v5
       - name: Show Swift version
         run: swift --version
-      - name: Build HengJie
-        run: swift build -c debug --product HengJie
+      - name: Build SnapWeave
+        run: swift build -c debug --product SnapWeave
       - name: Run Swift tests
         run: swift test
       - name: Run core checks
         run: |
-          swift run HengJieCoreChecks
-          swift run HengJieArchitectureChecks
+          swift run SnapWeaveCoreChecks
+          swift run SnapWeaveArchitectureChecks
       - name: Build release
-        run: swift build -c release --product HengJie
+        run: swift build -c release --product SnapWeave
       - name: Scan tracked sources for common secrets
         run: |
           if rg -n '(AKIA[0-9A-Z]{16}|-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----|ghp_[A-Za-z0-9]{30,})' Sources Resources scripts; then
@@ -37,4 +37,4 @@ jobs:
       - name: Build and verify ad-hoc package
         run: |
           ./scripts/build-app.sh
-          unzip -t outputs/横截-0.11.0-arm64.zip
+          unzip -t outputs/SnapWeave-0.11.1-arm64.zip
